@@ -10,7 +10,7 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-path: /_health
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:604179600882:certificate/6ea81750-36f3-4d9f-8151-f774927d2e5e
+    alb.ingress.kubernetes.io/certificate-arn: "${ACM_CERTIFICATE_ARN}"  # from: terraform output acm_certificate_arn
 spec:
   rules:
     - host: alb-outline.devops-agent.xyz
