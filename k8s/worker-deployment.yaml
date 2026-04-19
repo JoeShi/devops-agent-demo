@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outline-worker
+  namespace: outline
+  labels:
+    app: outline
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: outline
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: outline
+        component: worker
+    spec:
+      containers:
+        - name: outline-worker
+          image: outlinewiki/outline:1.6.1
+          command: ["node", "build/server/index.js", "--services=worker"]
+          envFrom:
+            - secretRef:
+                name: outline
+          env:
+            - name: URL
+              value: "https://outline.devops-agent.xyz"
+            - name: FILE_STORAGE
+              value: "local"
+            - name: PGSSLMODE
+              value: "require"
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: "0"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi

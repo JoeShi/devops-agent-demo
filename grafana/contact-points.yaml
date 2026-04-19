@@ -1,0 +1,38 @@
+# Grafana alerting contact points and notification policies
+# Import via Grafana provisioning or API
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: feishu-notifier
+    receivers:
+      - uid: feishu-lambda
+        type: webhook
+        settings:
+          url: "${FEISHU_NOTIFIER_LAMBDA_URL}"
+          httpMethod: POST
+        disableResolveMessage: false
+
+  - orgId: 1
+    name: github-issues
+    receivers:
+      - uid: github-webhook
+        type: webhook
+        settings:
+          url: "https://api.github.com/repos/${GITHUB_REPO}/issues"
+          httpMethod: POST
+          authorization_scheme: Bearer
+          authorization_credentials: "${GITHUB_TOKEN}"
+
+policies:
+  - orgId: 1
+    receiver: feishu-notifier
+    group_by: ["alertname", "namespace"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - receiver: github-issues
+        matchers:
+          - severity = critical
+        continue: true

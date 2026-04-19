@@ -1,0 +1,75 @@
+---
+# ServiceAccount — 绑定 IRSA Role，让 Pod 拥有调用 aidevops API 的权限
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: feishu-bot
+  namespace: outline
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::604179600882:role/outline-demo-eks-feishu-bot-role
+---
+# ExternalSecret — 从 Secrets Manager 拉取飞书凭证和 Agent Space ID
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: feishu-bot
+  namespace: outline
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: SecretStore
+  target:
+    name: feishu-bot
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: outline/feishu-bot
+---
+# Deployment — 长连接 Bot 进程，单副本常驻
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feishu-bot
+  namespace: outline
+  labels:
+    app: feishu-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feishu-bot
+  template:
+    metadata:
+      labels:
+        app: feishu-bot
+    spec:
+      serviceAccountName: feishu-bot
+      containers:
+        - name: feishu-bot
+          image: 604179600882.dkr.ecr.us-east-1.amazonaws.com/feishu-bot:latest
+          envFrom:
+            - secretRef:
+                name: feishu-bot   # FEISHU_APP_ID, FEISHU_APP_SECRET, DEVOPS_AGENT_SPACE_ID
+          env:
+            - name: AWS_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          # 长连接进程无 HTTP 端口，用进程存活探针
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,signal;[os.kill(int(p),0) for p in os.listdir('/proc') if p.isdigit() and 'app.py' in open(f'/proc/{p}/cmdline','rb').read().decode(errors='ignore')][:1] or exit(1)"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+      # 重启策略：崩溃后自动重连
+      restartPolicy: Always

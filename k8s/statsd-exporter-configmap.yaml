@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: statsd-exporter-mapping
+  namespace: outline
+data:
+  mapping.yml: |
+    mappings:
+      # ── WebSocket ──
+      - match: "outline.websockets.connected"
+        name: "outline_websockets_connected_total"
+        help: "Total WebSocket connections established"
+      - match: "outline.websockets.disconnected"
+        name: "outline_websockets_disconnected_total"
+        help: "Total WebSocket disconnections"
+      - match: "outline.websockets.count"
+        name: "outline_websockets_active"
+        help: "Current active WebSocket connections"
+
+      # ── HTTP Connections ──
+      - match: "outline.connections.count"
+        name: "outline_connections_active"
+        help: "Current active HTTP connections"
+
+      # ── Collaboration ──
+      - match: "outline.collaboration.connect"
+        name: "outline_collaboration_connect_total"
+        help: "Total collaboration connects"
+        labels:
+          document_id: "$1"
+      - match: "outline.collaboration.disconnect"
+        name: "outline_collaboration_disconnect_total"
+        help: "Total collaboration disconnects"
+      - match: "outline.collaboration.change"
+        name: "outline_collaboration_change_total"
+        help: "Total collaboration document changes"
+      - match: "outline.collaboration.load_document"
+        name: "outline_collaboration_load_document_total"
+        help: "Total collaboration document loads"
+      - match: "outline.collaboration.authentication_failed"
+        name: "outline_collaboration_auth_failed_total"
+        help: "Total collaboration authentication failures"
+      - match: "outline.collaboration.connections_count"
+        name: "outline_collaboration_connections_active"
+        help: "Current active collaboration connections"
+      - match: "outline.collaboration.documents_count"
+        name: "outline_collaboration_documents_active"
+        help: "Current actively edited documents"
+
+      # ── Queue / Worker ──
+      - match: "outline.*.jobs.completed"
+        name: "outline_jobs_completed_total"
+        help: "Total completed jobs"
+        labels:
+          queue: "$1"
+      - match: "outline.*.jobs.errored"
+        name: "outline_jobs_errored_total"
+        help: "Total errored jobs"
+        labels:
+          queue: "$1"
+      - match: "outline.*.jobs.failed"
+        name: "outline_jobs_failed_total"
+        help: "Total failed jobs"
+        labels:
+          queue: "$1"
+      - match: "outline.*.jobs.stalled"
+        name: "outline_jobs_stalled_total"
+        help: "Total stalled jobs"
+        labels:
+          queue: "$1"
+      - match: "outline.*.count"
+        name: "outline_queue_size"
+        help: "Current queue size"
+        labels:
+          queue: "$1"
+      - match: "outline.*.delayed_count"
+        name: "outline_queue_delayed_size"
+        help: "Current delayed queue size"
+        labels:
+          queue: "$1"
+
+      # ── Rate Limiting ──
+      - match: "outline.rate_limit.exceeded"
+        name: "outline_rate_limit_exceeded_total"
+        help: "Total rate limit exceeded events"
+
+      # ── Logging ──
+      - match: "outline.logger.error"
+        name: "outline_errors_total"
+        help: "Total application errors"
+      - match: "outline.logger.warning"
+        name: "outline_warnings_total"
+        help: "Total application warnings"

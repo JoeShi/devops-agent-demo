@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outline-web
+  namespace: outline
+  labels:
+    app: outline
+    component: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: outline
+      component: web
+  template:
+    metadata:
+      labels:
+        app: outline
+        component: web
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+    spec:
+      containers:
+        - name: outline
+          image: outlinewiki/outline:1.6.1
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: outline
+          env:
+            - name: URL
+              value: "https://outline.devops-agent.xyz"
+            - name: PORT
+              value: "3000"
+            - name: FILE_STORAGE
+              value: "local"
+            - name: PGSSLMODE
+              value: "require"
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: "0"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+        - name: statsd-exporter
+          image: prom/statsd-exporter:v0.27.2
+          args:
+            - "--statsd.listen-udp=:8125"
+            - "--web.listen-address=:9102"
+            - "--statsd.mapping-config=/etc/statsd-exporter/mapping.yml"
+          ports:
+            - name: metrics
+              containerPort: 9102
+            - name: statsd
+              containerPort: 8125
+              protocol: UDP
+          volumeMounts:
+            - name: statsd-mapping
+              mountPath: /etc/statsd-exporter
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: statsd-mapping
+          configMap:
+            name: statsd-exporter-mapping

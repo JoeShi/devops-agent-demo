@@ -1,0 +1,12 @@
+.agents/
+.claude/
+.kiro/
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/terraform.tfvars
+terraform/errored.tfstate
+terraform/modules/integration/lambda/.build/
+opencode.json
+skills-lock.json
+prompts.md
+ses-verified-emails.csv

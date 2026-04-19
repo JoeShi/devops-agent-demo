@@ -1,0 +1,33 @@
+project_name              = "outline-demo"
+region                    = "ap-northeast-1"
+vpc_cidr                  = "10.0.0.0/16"
+eks_node_instance_type    = "m5.xlarge"
+eks_node_count            = 3
+db_instance_class         = "db.r6g.large"
+redis_node_type           = "cache.r6g.large"
+opensearch_instance_type  = "t3.medium.search"
+opensearch_instance_count = 2
+environment               = "production"
+
+# Grafana
+grafana_admin_password = "CHANGE_ME"
+grafana_host           = "grafana.example.com"
+
+# OpenSearch
+opensearch_master_password = "CHANGE_ME"
+
+# Feishu integration
+feishu_webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_TOKEN"
+feishu_app_id      = "cli_YOUR_APP_ID"
+feishu_app_secret  = "YOUR_APP_SECRET"
+
+# GitHub integration
+github_token = "ghp_YOUR_TOKEN"
+github_repo  = "your-org/outline"
+
+# DevOps Agent (set after creating Agent Space)
+devops_agent_space_id = ""
+
+# CDN / Domain
+outline_domain    = "outline.devops-agent.xyz"
+route53_zone_name = "devops-agent.xyz"

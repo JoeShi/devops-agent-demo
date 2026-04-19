@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: outline
+  namespace: outline
+  labels:
+    app: outline
+spec:
+  selector:
+    matchLabels:
+      app: outline
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s

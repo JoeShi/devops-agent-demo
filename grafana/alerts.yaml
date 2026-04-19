@@ -1,0 +1,77 @@
+# Prometheus alerting rules for Outline application
+# Loaded by kube-prometheus-stack via additionalPrometheusRules
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: outline-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: outline.app
+      rules:
+        - alert: OutlineHighErrorRate
+          expr: |
+            sum(rate(http_request_duration_seconds_count{job="outline-web",code=~"5.."}[5m]))
+            / sum(rate(http_request_duration_seconds_count{job="outline-web"}[5m])) > 0.05
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline 5xx error rate above 5%"
+            description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+        - alert: OutlineHighLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="outline-web"}[5m])) by (le)) > 2
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Outline P95 latency above 2s"
+            description: "P95 latency is {{ $value }}s."
+
+        - alert: OutlinePodCrashLooping
+          expr: rate(kube_pod_container_status_restarts_total{namespace="outline"}[15m]) * 60 * 15 > 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline pod {{ $labels.pod }} is crash looping"
+
+        - alert: OutlinePodHighMemory
+          expr: |
+            container_memory_working_set_bytes{namespace="outline",container="outline"}
+            / container_spec_memory_limit_bytes{namespace="outline",container="outline"} > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Outline pod {{ $labels.pod }} memory usage above 85%"
+
+    - name: outline.infra
+      rules:
+        - alert: RDSHighConnections
+          expr: aws_rds_database_connections_average > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RDS connection count above 80"
+
+        - alert: RDSHighCPU
+          expr: aws_rds_cpuutilization_average > 80
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RDS CPU utilization above 80%"
+
+        - alert: RedisHighMemory
+          expr: aws_elasticache_database_memory_usage_percentage_average > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Redis memory usage above 80%"

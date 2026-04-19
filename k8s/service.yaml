@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: outline-web
+  namespace: outline
+  labels:
+    app: outline
+    component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: outline
+    component: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+    - name: metrics
+      port: 9102
+      targetPort: 9102
