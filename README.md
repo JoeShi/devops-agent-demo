@@ -13,7 +13,6 @@
 Internet ─→ Route53 ─→ CloudFront ─→ ALB ─→ EKS    │
   (outline.devops-agent.xyz)              │  ├── Outline Web x3 ←──────┘ (OIDC login)
                                           │  ├── Outline Worker
-                                          │  ├── Outline WebSocket
                                           │  ├── Prometheus + Grafana ←─┘ (OAuth login)
                                           │  ├── Fluent Bit → OpenSearch
                                           │  └── Feishu Bot Pod (WebSocket + IRSA)
@@ -24,15 +23,18 @@ Internet ─→ Route53 ─→ ALB (HTTPS) ──────┘
 EKS ←→ Aurora PostgreSQL (Multi-AZ)
 EKS ←→ ElastiCache Redis (Multi-AZ, TLS)
 
-── Ticket Flow ──────────────────────────────────────────────────────────────
-GitHub Issues (devops-agent-demo-tickets)
-  ├── issues.opened → GitHub Actions → aws devops-agent create-backlog-task
-  │                                     └── starts investigation in Agent Space
-  └── EventBridge (aws.aidevops) → Lambda (investigation_notifier)
-        ├── Investigation Created    → issue comment: "调查已创建"
-        ├── Investigation In Progress → issue comment: "调查开始 + operator web URL"
-        ├── Investigation Completed  → issue comment: "根因摘要"
-        └── other state changes      → issue comment: 状态更新
+── Alert → Ticket → Investigation Flow ─────────────────────────────────────
+Prometheus → Alertmanager → SNS → Lambda (feishu_notifier)
+  ├── 飞书告警卡片
+  └── GitHub Issue (devops-agent-demo-tickets, severity=critical/high)
+        └── issues.opened → GitHub Actions → HMAC Webhook
+              → DevOps Agent creates investigation
+
+EventBridge (aws.aidevops) → Lambda (investigation_notifier)
+  ├── Investigation Created    → issue comment: "调查已创建"
+  ├── Investigation In Progress → issue comment: "调查开始 + operator web URL"
+  ├── Investigation Completed  → issue comment: "根因摘要"
+  └── other state changes      → issue comment: 状态更新
 
 ── AWS DevOps Agent Space (outline) ────────────────────────────────────────
   ├── CloudWatch  (AWS resource metrics, auto-detected)
@@ -60,7 +62,7 @@ GitHub Issues (devops-agent-demo-tickets)
 ## 目录结构
 
 ```
-deploy/
+.
 ├── terraform/                    # Infrastructure as Code
 │   ├── main.tf                   # Root module
 │   ├── variables.tf
@@ -74,7 +76,7 @@ deploy/
 │       ├── cdn/                  # CloudFront, ACM certificates, Route53 records
 │       ├── observability/        # kube-prometheus-stack, Fluent Bit, Alertmanager IRSA (Helm)
 │       └── integration/          # SNS, EventBridge, Lambda, IRSA for Feishu Bot
-│           └── lambda/           # feishu_notifier.py
+│           └── lambda/           # feishu_notifier.py, investigation_notifier.py
 ├── k8s/                          # Kubernetes manifests (Kustomize)
 │   ├── namespace.yaml
 │   ├── secrets.yaml
@@ -96,7 +98,7 @@ deploy/
 │   ├── alerts.yaml               # PrometheusRule (7 alert rules)
 │   ├── dashboards/
 │   │   └── outline-app-overview.json  # Main dashboard (Terraform-managed)
-│   └── contact-points.yaml       # Feishu + GitHub Issues webhooks
+│   └── contact-points.yaml       # Alertmanager SNS receiver 参考配置
 ├── scripts/
 │   └── chaos.sh                  # Fault injection for demo scenarios
 └── README.md                     # This file
@@ -115,7 +117,7 @@ deploy/
 ## 第一步：部署基础设施
 
 ```bash
-cd deploy/terraform
+cd terraform
 
 # Configure variables
 cp terraform.tfvars.example terraform.tfvars
@@ -144,17 +146,17 @@ terraform apply
 # Configure kubectl
 aws eks update-kubeconfig --name outline-demo --region us-east-1
 
-# Update secrets (edit deploy/k8s/secrets.yaml with real values from terraform output)
+# Update secrets (edit k8s/secrets.yaml with real values from terraform output)
 terraform output -json  # Get RDS/Redis endpoints
 
 # Deploy
-kubectl apply -k deploy/k8s/
+kubectl apply -k k8s/
 
 # Apply Grafana alerts and dashboard
-kubectl apply -f deploy/grafana/alerts.yaml
+kubectl apply -f grafana/alerts.yaml
 ```
 
-通过 Grafana UI 导入 `deploy/grafana/dashboards/outline-app-overview.json`（Dashboards → Import），或让 Terraform 通过 `grafana-dashboard-outline` ConfigMap 自动配置。
+通过 Grafana UI 导入 `grafana/dashboards/outline-app-overview.json`（Dashboards → Import），或让 Terraform 通过 `grafana-dashboard-outline` ConfigMap 自动配置。
 
 ## 第三步：配置 AWS DevOps Agent
 
@@ -228,14 +230,9 @@ aws devops-agent get-association \
   --region us-east-1
 ```
 
-关联完成后，`associate-service` 的响应中包含一个 **Grafana 告警 webhook URL** 和 API key。使用它们配置 Grafana 联系点，以便告警自动触发 DevOps Agent 调查：
+关联完成后，DevOps Agent 即可通过 Grafana 查询 Prometheus 指标和 OpenSearch 日志进行事件调查。
 
-| 字段 | 值 |
-|------|-----|
-| Webhook URL | 来自 `aws devops-agent associate-service` 输出的 `.webhook.webhookUrl` |
-| Auth header | `x-api-key: <apiKey from output>` |
-
-在 Grafana（`Alerting → Contact points`）中，使用上述 URL 和 header 创建 Webhook 联系点，然后将其分配到通知策略中。
+> **注意**：告警通知链路走 Alertmanager → SNS → Lambda → GitHub Issue → Webhook 触发调查，不需要在 Grafana 中配置额外的 Contact Point。
 
 ### 3c. 其他能力（手动配置）
 
@@ -295,16 +292,18 @@ aws devops-agent associate-service \
 ```
 GitHub Issue created (issues.opened)
   → GitHub Actions workflow (.github/workflows/trigger-investigation.yml)
-    → aws devops-agent create-backlog-task
-        --reference: system=github, referenceId=<issue-number>, referenceUrl=<issue-url>
-      → DevOps Agent creates investigation, returns task_id
-      → Writes task_id → issue mapping to SSM Parameter Store
+    → 构建 incident payload (incidentId = "<repo>#<number>")
+    → HMAC-SHA256 签名
+    → POST to Agent Space Webhook URL
+      → DevOps Agent creates investigation
+    → 在 Issue 上发表评论："调查已触发"
 
 EventBridge (aws.aidevops) → Lambda (investigation_notifier)
-  → Reads task_id → issue mapping from SSM
-  → Investigation Created    → GitHub issue comment: "调查已创建，task_id=..."
-  → Investigation In Progress → GitHub issue comment: "调查进行中\n查看详情: <operator-web-url>"
-  → Investigation Completed  → GitHub issue comment: "调查完成\n根因摘要: <summary>"
+  → 调用 get-backlog-task 获取 reference.referenceId
+  → 解析 referenceId ("<repo>#<number>") 定位 GitHub Issue
+  → Investigation Created    → GitHub issue comment: "调查已创建"
+  → Investigation In Progress → GitHub issue comment: "调查进行中 + operator web URL"
+  → Investigation Completed  → GitHub issue comment: "根因摘要"
   → Investigation Failed/Cancelled → GitHub issue comment: 对应状态
 ```
 
@@ -312,11 +311,9 @@ EventBridge (aws.aidevops) → Lambda (investigation_notifier)
 
 | 组件 | 位置 | 用途 |
 |------|------|------|
-| GitHub Actions 工作流 | `devops-agent-demo-tickets/.github/workflows/trigger-investigation.yml` | 监听 `issues.opened` 事件，调用 `create-backlog-task`，将 task→issue 映射存储到 SSM |
-| Lambda `investigation_notifier` | `terraform/modules/integration/lambda/investigation_notifier.py` | 接收 EventBridge 事件，读取 SSM 映射，将评论写回 GitHub Issue |
-| EventBridge 规则 `devops-agent-investigation-to-github` | `terraform/modules/integration/main.tf` | 将 `aws.aidevops` Investigation 事件（按 Agent Space ID 过滤）路由到 Lambda |
-| IAM 角色 `github-actions-tickets-role` | `terraform/modules/integration/main.tf` | GitHub Actions 的 OIDC 联合认证，允许 `aidevops:CreateBacklogTask` + `ssm:PutParameter` |
-| `feishu-notifier-role` 的 IAM 策略 | `terraform/modules/integration/main.tf` | 允许 Lambda 调用 `aidevops:ListJournalRecords` + `ssm:GetParameter` + `secretsmanager:GetSecretValue` |
+| GitHub Actions 工作流 | `devops-agent-demo-tickets/.github/workflows/trigger-investigation.yml` | 监听 `issues.opened` 事件，通过 HMAC Webhook 触发 DevOps Agent 调查 |
+| Lambda `investigation_notifier` | `terraform/modules/integration/lambda/investigation_notifier.py` | 接收 EventBridge 事件，通过 `get-backlog-task` 解析 Issue 映射，将评论写回 GitHub Issue |
+| EventBridge 规则 | `terraform/modules/integration/main.tf` | 将 `aws.aidevops` Investigation 事件（按 Agent Space ID 过滤）路由到 Lambda |
 
 #### 配置步骤
 
@@ -327,25 +324,11 @@ cd terraform
 terraform apply
 ```
 
-apply 完成后，记录输出：
+**步骤 2：获取 Agent Space Webhook 凭证**
 
-```
-github_actions_tickets_role_arn = "arn:aws:iam::<account>:role/github-actions-tickets-role"
-```
-
-**步骤 2：配置 GitHub OIDC 提供商**
-
-如果这是该 AWS 账户首次使用 GitHub Actions OIDC，需要创建身份提供商：
-
-```bash
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1 \
-  --region us-east-1
-```
-
-> 如果账户中已有 `token.actions.githubusercontent.com` OIDC 提供商，跳过此步骤。
+在 AWS 控制台的 Agent Space 页面，或通过 `associate-service` 输出获取：
+- **Webhook URL**：Agent Space 的 incident webhook endpoint
+- **Webhook Secret**：用于 HMAC-SHA256 签名的密钥
 
 **步骤 3：设置 GitHub Actions Secrets**
 
@@ -353,9 +336,10 @@ aws iam create-open-id-connect-provider \
 
 | Secret | 值 |
 |--------|-----|
-| `AWS_ROLE_ARN` | `arn:aws:iam::604179600882:role/github-actions-tickets-role` |
-| `DEVOPS_AGENT_SPACE_ID` | `9e3ca279-9252-4dd8-b19f-1ca9cb7c8439` |
-| `AWS_REGION` | `us-east-1` |
+| `DEVOPS_AGENT_WEBHOOK_URL` | Agent Space Webhook URL |
+| `DEVOPS_AGENT_WEBHOOK_SECRET` | Webhook HMAC 签名密钥 |
+
+> **注意**：不需要 AWS IAM 角色或 OIDC 配置——Webhook 方案通过 HMAC 签名认证，无需 AWS 凭证。
 
 **步骤 4：推送工作流文件**
 
@@ -379,16 +363,15 @@ gh issue create \
 ```
 
 预期结果：
-1. GitHub Actions 工作流运行 → 在 DevOps Agent 中创建 backlog task
-2. Issue 上出现评论："DevOps Agent 调查已触发"，附带 task ID
-3. EventBridge 投递 `Investigation Created` → Lambda 发表评论："调查已创建"
-4. EventBridge 投递 `Investigation In Progress` → Lambda 发表评论："调查进行中" + 可点击的 operator web URL
-5. EventBridge 投递 `Investigation Completed` → Lambda 发表评论：根因摘要
+1. GitHub Actions 工作流运行 → Webhook 触发 DevOps Agent 调查
+2. Issue 上出现评论："DevOps Agent 调查已触发"，附带 incident ID
+3. EventBridge 投递 `Investigation In Progress` → Lambda 发表评论："调查进行中" + 可点击的 operator web URL
+4. EventBridge 投递 `Investigation Completed` → Lambda 发表评论：根因摘要
 
 #### Operator web 调查 URL 格式
 
 ```
-https://<region>.console.aws.amazon.com/aidevops/agent-spaces/<agent-space-id>/investigations/<task_id>
+https://<space-id>.aidevops.global.app.aws/<space-id>/investigation/<task_id>
 ```
 
 此 URL 包含在"调查进行中"评论中，工程师可以直接点击跳转到调查详情页面。
@@ -483,7 +466,7 @@ kubectl logs -n outline -l app=feishu-bot
 将工作流文件复制到你的仓库：
 
 ```bash
-cp deploy/github-actions/deploy.yml .github/workflows/deploy.yml
+cp github-actions/deploy.yml .github/workflows/deploy.yml
 ```
 
 设置 GitHub Actions secrets：
@@ -539,9 +522,9 @@ cp deploy/github-actions/deploy.yml .github/workflows/deploy.yml
 
 ```bash
 # Delete K8s resources first
-kubectl delete -k deploy/k8s/
+kubectl delete -k k8s/
 
 # Destroy infrastructure
-cd deploy/terraform
+cd terraform
 terraform destroy
 ```

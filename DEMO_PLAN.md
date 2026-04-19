@@ -246,7 +246,6 @@ Redis 网络不可达（NetworkPolicy 阻断了 6379 端口出站流量）。Web
 - [ ] 确认 DevOps Agent Space 已配置（Grafana + GitHub + CloudWatch）
 - [ ] 确认飞书 Bot 在线（WebSocket 已连接）
 - [ ] 确认 Grafana Alert 规则已部署（7 条规则）
-- [ ] 确认 Grafana → DevOps Agent Webhook Contact Point 已配置
 - [ ] 预录场景 1、2、3 的调查过程（截图/录屏）
 - [ ] 准备 chaos.sh 脚本（场景 3 现场注入用）
 
