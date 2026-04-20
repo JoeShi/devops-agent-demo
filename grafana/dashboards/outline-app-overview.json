@@ -354,16 +354,16 @@
       },
       "targets": [
         {
-          "expr": "sum by (queue) (rate(outline_jobs_completed_total[5m]))",
-          "legendFormat": "{{ queue }} completed/s"
+          "expr": "sum by (queue) (rate(outline_queue_tasks_jobs_completed[5m]))",
+          "legendFormat": "tasks completed/s"
         },
         {
-          "expr": "sum by (queue) (rate(outline_jobs_errored_total[5m]))",
-          "legendFormat": "{{ queue }} errored/s"
+          "expr": "sum by (queue) (rate(outline_queue_global_events_jobs_completed[5m]))",
+          "legendFormat": "events completed/s"
         },
         {
-          "expr": "sum by (queue) (rate(outline_jobs_failed_total[5m]))",
-          "legendFormat": "{{ queue }} failed/s"
+          "expr": "sum by (queue) (rate(outline_queue_tasks_jobs_failed[5m]))",
+          "legendFormat": "tasks failed/s"
         }
       ],
       "fieldConfig": {
@@ -395,12 +395,12 @@
       },
       "targets": [
         {
-          "expr": "outline_queue_size",
-          "legendFormat": "{{ queue }}"
+          "expr": "outline_queue_tasks_count",
+          "legendFormat": "tasks"
         },
         {
-          "expr": "outline_queue_delayed_size",
-          "legendFormat": "{{ queue }} (delayed)"
+          "expr": "outline_queue_tasks_delayed_count",
+          "legendFormat": "tasks (delayed)"
         }
       ],
       "fieldConfig": {
@@ -579,7 +579,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Log Volume by Stream (stdout/stderr)",
+      "title": "Log Volume by Container",
       "datasource": {
         "uid": "P9744FCCEAAFBD98F"
       },
@@ -602,11 +602,11 @@
           "bucketAggs": [
             {
               "type": "terms",
-              "field": "stream",
+              "field": "kubernetes.container_name",
               "id": "3",
               "settings": {
                 "order": "desc",
-                "size": "5",
+                "size": "10",
                 "orderBy": "_count"
               }
             },
@@ -631,24 +631,7 @@
               "mode": "normal"
             }
           }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "stderr"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        }
       }
     },
     {

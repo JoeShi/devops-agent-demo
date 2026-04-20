@@ -78,10 +78,74 @@ def handler(event, context):
 
     # SNS invocation (from Alertmanager SNS receiver)
     if "Records" in event and event["Records"][0].get("EventSource") == "aws:sns":
-        body = json.loads(event["Records"][0]["Sns"]["Message"])
+        message = event["Records"][0]["Sns"]["Message"]
+        # Alertmanager SNS may send JSON or plain text depending on config
+        try:
+            body = json.loads(message)
+        except (json.JSONDecodeError, TypeError):
+            # Plain text message from Alertmanager default template
+            # Parse what we can from the SNS attributes and message text
+            attrs = event["Records"][0]["Sns"].get("MessageAttributes", {})
+            subject = event["Records"][0]["Sns"].get("Subject", "")
+            body = _parse_plaintext_alert(message, subject, attrs)
         return _handle_alertmanager(body)
 
     return _handle_eventbridge(event)
+
+
+def _parse_plaintext_alert(message, subject, attrs):
+    """Parse Alertmanager's default plain-text SNS message into alert structure."""
+    import re
+    from datetime import datetime, timezone
+
+    # Extract alertname from Labels section
+    alertname = "PrometheusAlert"
+    match = re.search(r"alertname\s*=\s*(\S+)", message)
+    if match:
+        alertname = match.group(1)
+    elif subject:
+        alertname = subject.strip()
+
+    # Extract severity
+    severity = "critical"
+    match = re.search(r"severity\s*=\s*(\S+)", message)
+    if match:
+        severity = match.group(1)
+
+    # Extract summary/description from Annotations section
+    summary = alertname
+    match = re.search(r"summary\s*=\s*(.+?)(?:\n|$)", message)
+    if match:
+        summary = match.group(1).strip()
+
+    description = summary
+    match = re.search(r"description\s*=\s*(.+?)(?:\n|$)", message)
+    if match:
+        description = match.group(1).strip()
+
+    # Extract namespace
+    namespace = ""
+    match = re.search(r"namespace\s*=\s*(\S+)", message)
+    if match:
+        namespace = match.group(1)
+
+    # Build Grafana dashboard URL
+    dashboard_url = "https://grafana.devops-agent.xyz/d/outline-app-overview/outline-application-overview"
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return {
+        "status": "firing",
+        "commonLabels": {"alertname": alertname},
+        "alerts": [{
+            "status": "firing",
+            "labels": {"alertname": alertname, "severity": severity, "namespace": namespace},
+            "annotations": {"summary": summary, "description": description},
+            "startsAt": now,
+            "generatorURL": dashboard_url,
+            "dashboardURL": dashboard_url,
+        }]
+    }
 
 
 def _handle_alertmanager(body):

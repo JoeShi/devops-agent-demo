@@ -236,6 +236,73 @@ Redis 网络不可达（NetworkPolicy 阻断了 6379 端口出站流量）。Web
 
 ---
 
+## 场景 6：代码 Bug 导致 Worker OOM（Export Memory Leak）
+
+**展示能力**：代码级 Bug 追溯 + 完整告警链路 + 自动调查
+
+**故事**：一位开发者提交了一个"修复导出重复内容"的 PR，引入了一个隐蔽的内存泄漏。当 collection 中存在空标题文档时，导出任务会不断重试并累积内存，最终导致 Worker Pod OOM 崩溃。
+
+### 注入方式
+
+```bash
+./scripts/chaos.sh export-oom
+```
+
+该命令通过 Outline API 在目标 collection 中创建一篇空标题文档，然后触发 collection 导出。
+
+### 触发链路
+
+```
+用户点击 Collection → "⋯" → "Export"
+  → Worker 拾取 ExportTask
+  → processDocument 遇到空标题文档
+  → _exportDeduplicationBuffer 累积大量字符串（内存泄漏）
+  → 抛出错误 → Bull 队列重试（attempts: 50）
+  → 每次重试都泄漏更多内存
+  → Worker Pod 内存 > 85%
+  → OutlinePodHighMemory 告警触发
+  → 继续增长 → OOM Kill → Pod 重启
+  → OutlinePodCrashLooping 告警触发
+  → Alertmanager → SNS → Lambda
+    ├── 飞书告警卡片 🔴
+    └── GitHub Issue (severity=critical)
+          └── GitHub Actions → DevOps Agent 自动调查
+```
+
+### 调查过程（预录/现场）
+
+1. Agent 查询 Grafana/Prometheus → Worker Pod 内存线性增长直到 OOM，反复重启
+2. Agent 查询 Grafana/OpenSearch → 发现 `JavaScript heap out of memory` + `Export failed: document xxx has empty title`
+3. Agent 查询 CloudWatch → RDS/Redis 正常，排除基础设施问题
+4. Agent 关联 GitHub → 定位到最近 commit 修改了 `ExportDocumentTreeTask.ts`，引入了 `_exportDeduplicationBuffer`
+5. Agent 分析代码 → 识别出模块级数组无限增长 + 重试次数从 1 改为 50
+
+### 根因摘要
+
+`ExportDocumentTreeTask.ts` 中新增的"导出去重"逻辑（`_exportDeduplicationBuffer`）存在内存泄漏。当文档标题为空时，每次处理都向模块级数组推入约 1000 条大字符串，然后抛出错误触发重试。由于 `ExportTask` 的重试次数被从 1 改为 50，任务会反复重试，每次都泄漏更多内存，最终导致 Worker Pod OOM Kill。
+
+### 修复建议
+
+- 回滚引入 `_exportDeduplicationBuffer` 的 commit
+- 将 ExportTask attempts 恢复为 1（导出任务不应重试）
+- 对空标题文档使用 fallback 名称（如 "Untitled"）而非抛出错误
+- 如需去重缓存，应使用有大小上限的 LRU Cache 而非无限数组
+
+### 演示亮点
+
+- **一次点击触发**：用户只需点击"导出集合"，不需要压测脚本
+- **真实代码 Bug**：模块级变量内存泄漏 + 错误的重试策略，是实际开发中常见的问题
+- **Agent 追溯到具体代码行**：通过 GitHub 集成定位到 `ExportDocumentTreeTask.ts` 的 `_exportDeduplicationBuffer`
+- **完整闭环**：用户操作 → Worker 崩溃 → 告警 → 飞书 → 工单 → 自动调查 → 定位代码
+
+### 清理
+
+```bash
+./scripts/chaos.sh export-oom --cleanup
+```
+
+---
+
 ## 环境准备 Checklist
 
 ### 演示前

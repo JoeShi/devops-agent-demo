@@ -14,7 +14,8 @@ Usage: $0 <scenario> [--cleanup]
 Scenarios:
   db-exhaust     Scenario 1: Exhaust RDS connection pool
   slow-deploy    Scenario 2: Deploy a bad image that causes high latency
-  redis-failure  Scenario 5: Simulate Redis failure (delete pod / block traffic)
+  redis-failure  Scenario 3: Simulate Redis failure (delete pod / block traffic)
+  export-oom     Scenario 6: Trigger export OOM via empty-title document
 
 Options:
   --cleanup      Revert the injected fault
@@ -135,9 +136,71 @@ NP
   echo "  kubectl logs -l app=outline -n $NAMESPACE --tail=20"
 }
 
+# --- Scenario 6: Export OOM (empty-title document triggers memory leak) ---
+export_oom() {
+  local OUTLINE_URL="${OUTLINE_URL:-https://outline.devops-agent.xyz}"
+  local OUTLINE_TOKEN="${OUTLINE_TOKEN:-}"
+
+  if [[ -z "$OUTLINE_TOKEN" ]]; then
+    echo "[error] OUTLINE_TOKEN env var required (Outline API token)"
+    echo "  Get one from: ${OUTLINE_URL}/settings/api"
+    exit 1
+  fi
+
+  if [[ "$CLEANUP" == "--cleanup" ]]; then
+    echo "[cleanup] Restarting outline-worker to clear leaked memory..."
+    kubectl rollout restart deployment/outline-worker -n "$NAMESPACE"
+    kubectl rollout status deployment/outline-worker -n "$NAMESPACE" --timeout=120s
+    echo "[cleanup] Done. Note: the empty-title document remains in Outline."
+    echo "  Delete it manually from the UI if needed."
+    return
+  fi
+
+  echo "[inject] Creating empty-title document in first collection..."
+
+  # Get first collection
+  COLLECTION_ID=$(curl -s -X POST "${OUTLINE_URL}/api/collections.list" \
+    -H "Authorization: Bearer ${OUTLINE_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{}' | python3 -c "import sys,json; data=json.load(sys.stdin); print(data['data'][0]['id'])" 2>/dev/null)
+
+  if [[ -z "$COLLECTION_ID" ]]; then
+    echo "[error] Failed to get collection ID. Check OUTLINE_TOKEN."
+    exit 1
+  fi
+
+  echo "  Collection: $COLLECTION_ID"
+
+  # Create a document with empty title (published so it appears in export)
+  DOC_ID=$(curl -s -X POST "${OUTLINE_URL}/api/documents.create" \
+    -H "Authorization: Bearer ${OUTLINE_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"title\": \"\", \"text\": \"This document has no title.\", \"collectionId\": \"${COLLECTION_ID}\", \"publish\": true}" \
+    | python3 -c "import sys,json; data=json.load(sys.stdin); print(data['data']['id'])" 2>/dev/null)
+
+  if [[ -z "$DOC_ID" ]]; then
+    echo "[error] Failed to create document. API response unexpected."
+    exit 1
+  fi
+
+  echo "  Created empty-title document: $DOC_ID"
+  echo ""
+  echo "[inject] Now trigger the bug by exporting the collection:"
+  echo "  1. Open ${OUTLINE_URL}"
+  echo "  2. Go to the collection → click '⋯' → 'Export'"
+  echo "  3. Worker will crash within ~30 seconds"
+  echo ""
+  echo "  Or trigger via API:"
+  echo "  curl -X POST ${OUTLINE_URL}/api/collections.export \\"
+  echo "    -H 'Authorization: Bearer ${OUTLINE_TOKEN}' \\"
+  echo "    -H 'Content-Type: application/json' \\"
+  echo "    -d '{\"id\": \"${COLLECTION_ID}\"}'"
+}
+
 case "$SCENARIO" in
   db-exhaust)    db_exhaust ;;
   slow-deploy)   slow_deploy ;;
   redis-failure) redis_failure ;;
+  export-oom)    export_oom ;;
   *)             usage ;;
 esac
