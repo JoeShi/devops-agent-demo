@@ -119,6 +119,20 @@ resource "helm_release" "kube_prometheus_stack" {
               memory = "3Gi"
             }
           }
+          storageSpec = {
+            volumeClaimTemplate = {
+              spec = {
+                storageClassName = "gp2"
+                accessModes      = ["ReadWriteOnce"]
+                resources = {
+                  requests = {
+                    storage = "50Gi"
+                  }
+                }
+              }
+            }
+          }
+          retention = "15d"
         }
       }
       grafana = {
