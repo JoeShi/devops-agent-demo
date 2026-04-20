@@ -461,6 +461,127 @@ kubectl logs -n outline -l app=feishu-bot
 | `AttributeError: 'EventDispatcherHandlerBuilder' object has no attribute 'register'` | lark-oapi >= 1.4 更改了 API | 使用 `register_p2_im_message_receive_v1()` 替代 `.register()` |
 | `Could not connect to endpoint aidevops.us-east-1.amazonaws.com` | DevOps Agent API 仅在 VPC 内可解析 | Bot 必须在 EKS 内运行（不能在本地）；确保 Agent Space 已创建 |
 
+### 3e. 企业微信 Bot (WeCom) — SRE 对话（双向通信）
+
+企业微信 Bot 以长连接 WebSocket Pod 形式运行在 EKS 中，通过 IRSA 调用 DevOps Agent Chat API。与飞书 Bot（3d）架构对称，唯一区别是协议层：飞书有官方 `lark-oapi` SDK，企业微信 aibot 长连接目前没有官方 Python SDK，因此我们用原始 `websockets` 库 + WeCom 自定义 JSON 帧（`aibot_subscribe` / `aibot_msg_callback` / `aibot_respond_msg` / `aibot_send_msg`）直接接入。
+
+> WeCom 服务器会把 RFC 6455 ping 判定为 `PROTOCOL_ERROR 1002`（"incorrect masking"），所以 `websockets.connect(url, ping_interval=None)` 必须显式关闭库级心跳；订阅会话本身足够长寿，断线后由重连循环在 ~1s 内恢复。
+
+#### 3e-1. 创建企业微信 aibot
+
+1. 前往 [企业微信管理后台](https://work.weixin.qq.com/wework_admin) → 应用管理 → 智能机器人
+2. 新建 aibot，记录 `bot_id` 和 `secret`（secret 一次性可见，务必保存）
+3. 启用"长连接接收消息"开关（这会返回 `wss://openws.work.weixin.qq.com` 端点）
+4. 将机器人添加到目标群聊；在群里 @机器人 即可触发 `aibot_msg_callback` 事件
+
+> 与飞书不同，企业微信的 aibot 权限体系很扁平：拿到 `bot_id + secret` 就可以订阅消息，不需要单独开通"获取 @消息"事件权限。
+
+#### 3e-2. 创建 Secrets Manager 密钥
+
+```bash
+aws secretsmanager create-secret \
+  --name outline/wecom-bot \
+  --region us-east-1 \
+  --secret-string '{
+    "WECOM_BOT_ID": "<your-bot-id>",
+    "WECOM_BOT_SECRET": "<your-bot-secret>",
+    "DEVOPS_AGENT_SPACE_ID": "<your-agent-space-id>"
+  }'
+```
+
+`k8s/wecom-bot-deployment.yaml` 中的 ExternalSecret 会自动同步为同名 K8s Secret；Pod 通过 `envFrom` 注入这三个变量。
+
+#### 3e-3. 部署 IRSA 角色（Terraform）
+
+Terraform `modules/integration` 里已经在 T2 里加好了 `aws_iam_role.wecom_bot`（信任 OIDC，授权 `aidevops:CreateChat` / `SendMessage` / `ListChats` 到目标 Agent Space），只需 apply：
+
+```bash
+cd terraform
+terraform apply -target=module.integration.aws_iam_role.wecom_bot \
+               -target=module.integration.aws_iam_role_policy.wecom_bot_devops_agent
+```
+
+输出的 `wecom_bot_role_arn` 应为 `arn:aws:iam::<account>:role/outline-demo-eks-wecom-bot-role`，ServiceAccount 注解已经在 `k8s/wecom-bot-deployment.yaml` 中写死为这个 ARN。
+
+#### 3e-4. 构建并推送 Bot 镜像
+
+```bash
+# Create ECR repo (first time only)
+aws ecr create-repository --repository-name wecom-bot --region us-east-1
+
+# Authenticate Docker to ECR
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
+
+# Build (must be linux/amd64 for EKS) and push
+docker build --platform linux/amd64 \
+  -t <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/wecom-bot:latest k8s/wecom-bot/
+docker push <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/wecom-bot:latest
+```
+
+镜像布局和 `k8s/feishu-bot/` 完全对称：`python:3.12-slim` + 非 root UID 1000 + `requirements.txt` 只含 `websockets>=12.0` 和 `boto3>=1.34.0`。
+
+#### 3e-5. 部署
+
+```bash
+kubectl apply -f k8s/wecom-bot-deployment.yaml
+```
+
+验证：
+
+```bash
+# Pod should be Running
+kubectl get pods -n outline -l app=wecom-bot
+
+# Logs should show WebSocket connected + subscribe sent within ~5s
+kubectl logs -n outline -l app=wecom-bot -f
+# Expected:
+#   Starting WeCom Bot WebSocket client …
+#   Connected to wss://openws.work.weixin.qq.com
+#   Sent aibot_subscribe for bot_id=...
+```
+
+在群里 @机器人 并发送一条消息，Pod 日志应该连续出现：
+1. `Received [<chatid>]: <你发的内容>` — 收到 `aibot_msg_callback`
+2. `Created execution <exec-id>` — 首次消息创建 DevOps Agent `executionId`
+3. `Reply [<chatid>]: <agent 回复前 200 字符>` — 调用 `send_message` 拿到 EventStream 后落地
+
+群里应该先收到 `收到，正在思考…`（ack），再收到完整回复；超过 3500 字节的长回复会被拆分并以 `（i/N）` 前缀。
+
+#### 3e-6. 架构图
+
+```
+User (WeCom 群聊)
+      │  @wecom-bot <question>
+      ▼
+WeCom aibot WS  wss://openws.work.weixin.qq.com
+      │  aibot_msg_callback
+      ▼
+wecom-bot Pod  (EKS, IRSA)
+      │  aibot_respond_msg  "收到，正在思考…"  (<100ms)
+      ├──────────── ack frame ──────────────▶ WeCom WS ──▶ User
+      │
+      │  boto3.devops-agent.create_chat / send_message
+      ▼
+AWS DevOps Agent Space  (us-east-1)
+      │  EventStream: contentBlockStart/Delta/Stop + responseFailed
+      ▼
+wecom-bot Pod  (解析 EventStream → last-block heuristic → 拆分 3500B)
+      │  aibot_send_msg  markdown {content: reply}
+      ▼
+WeCom WS ──▶ User
+```
+
+#### 3e-7. 故障排查
+
+| 症状 | 原因 | 修复方法 |
+|------|------|----------|
+| 启动后连不上，日志反复 `WS closed … PROTOCOL_ERROR 1002` | `websockets` 默认会发 RFC 6455 ping，WeCom 视作 masking 错误 | 确认 `app.py` 里 `ws_connect(url, ping_interval=None)`；不要自己在 Pod 里开启应用层 ping |
+| `botocore.exceptions.ClientError: AccessDenied … aidevops:CreateChat` | IRSA 角色的资源 ARN 不匹配，或者 ServiceAccount 注解错 | 检查 `kubectl -n outline get sa wecom-bot -o yaml` 的注解是否指向 T2 的 `wecom_bot_role_arn`；检查 Terraform policy 的 `Resource` 末端 `agentspace/${DEVOPS_AGENT_SPACE_ID}` 和 secret 里 ID 一致 |
+| 群里收到 `（DevOps Agent 未返回内容）` | Agent send_message 返回了事件但没有 text 增量（例如被工具调用占满） | 检查 `kubectl logs` 里 EventStream 的 `contentBlockStart` 类型；必要时在 Agent Space 里换 Persona 或检查 Grafana 数据源可达 |
+| 长 Mermaid/表格被截断且不分页 | 单行 UTF-8 字节 > 3500 | app.py 的 `split_utf8_chunks` 会在字符边界硬切；这是预期行为，但对 Mermaid 语法不友好，必要时让 Agent 用 `---` 分段输出 |
+| WS 断开后迟迟不重连 | 所在 EKS 节点 DNS 故障或出站阻断 | 检查 `kubectl exec -n outline deploy/wecom-bot -- nslookup openws.work.weixin.qq.com`；必要时确认 NAT 出口到 qq.com 443 未被策略拦 |
+
 ## 第四步：配置 CI/CD
 
 将工作流文件复制到你的仓库：

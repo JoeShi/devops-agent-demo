@@ -2,8 +2,8 @@ data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 
 locals {
-  notifier_zip              = "${path.module}/lambda/feishu_notifier.zip"
-  investigation_notifier_zip = "${path.module}/lambda/investigation_notifier.zip"
+  notifier_zip                     = "${path.module}/lambda/feishu_notifier.zip"
+  investigation_notifier_zip       = "${path.module}/lambda/investigation_notifier.zip"
   investigation_notifier_build_dir = "${path.module}/lambda/.build/investigation_notifier"
 }
 # --- Archive: feishu-notifier only ---
@@ -109,10 +109,10 @@ resource "aws_lambda_function" "feishu_notifier" {
 
   environment {
     variables = {
-      FEISHU_BOT_SECRET    = "outline/feishu-bot"
-      FEISHU_CHAT_ID       = var.feishu_chat_id
-      GITHUB_TOKEN_SECRET  = aws_secretsmanager_secret.github_token.arn
-      GITHUB_REPO          = var.github_repo
+      FEISHU_BOT_SECRET   = "outline/feishu-bot"
+      FEISHU_CHAT_ID      = var.feishu_chat_id
+      GITHUB_TOKEN_SECRET = aws_secretsmanager_secret.github_token.arn
+      GITHUB_REPO         = var.github_repo
     }
   }
 }
@@ -222,6 +222,49 @@ resource "aws_iam_role_policy" "feishu_bot_devops_agent" {
   })
 }
 
+# --- IRSA: wecom-bot EKS Pod → aidevops Chat API ---
+# Bot 以长连接模式运行在 EKS 上，通过 IRSA 获取调用 DevOps Agent 的权限。
+# 与 feishu-bot 平行，直接授予 aidevops:CreateChat/SendMessage/ListChats 到 agentspace ARN。
+
+resource "aws_iam_role" "wecom_bot" {
+  name = "${var.eks_cluster_name}-wecom-bot-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = var.oidc_provider_arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${var.oidc_issuer_host}:sub" = "system:serviceaccount:outline:wecom-bot"
+          "${var.oidc_issuer_host}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+
+  tags = { ManagedBy = "terraform" }
+}
+
+resource "aws_iam_role_policy" "wecom_bot_devops_agent" {
+  name = "devops-agent-chat"
+  role = aws_iam_role.wecom_bot.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "aidevops:CreateChat",
+        "aidevops:SendMessage",
+        "aidevops:ListChats",
+      ]
+      Resource = "arn:aws:aidevops:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:agentspace/${var.devops_agent_space_id}"
+    }]
+  })
+}
+
 # ---------------------------------------------------------------------------
 # AWS DevOps Agent — Private Connection (VPC Lattice)
 #
@@ -233,10 +276,10 @@ resource "null_resource" "devops_agent_private_connection" {
   count = var.vpc_id != "" ? 1 : 0
 
   triggers = {
-    connection_name  = var.private_connection_name
-    vpc_id           = var.vpc_id
-    subnet_ids       = join(",", var.private_subnet_ids)
-    host_address     = var.grafana_alb_dns_name
+    connection_name = var.private_connection_name
+    vpc_id          = var.vpc_id
+    subnet_ids      = join(",", var.private_subnet_ids)
+    host_address    = var.grafana_alb_dns_name
   }
 
   provisioner "local-exec" {
@@ -328,11 +371,11 @@ resource "null_resource" "devops_agent_grafana_register" {
   depends_on = [null_resource.devops_agent_private_connection]
 
   triggers = {
-    grafana_url         = var.grafana_url
-    grafana_name        = var.grafana_service_name
-    agent_space_id      = var.devops_agent_space_id
-    secret_arn          = var.grafana_sa_token_secret_arn
-    private_conn_name   = var.private_connection_name
+    grafana_url       = var.grafana_url
+    grafana_name      = var.grafana_service_name
+    agent_space_id    = var.devops_agent_space_id
+    secret_arn        = var.grafana_sa_token_secret_arn
+    private_conn_name = var.private_connection_name
   }
 
   provisioner "local-exec" {
@@ -481,10 +524,10 @@ resource "aws_lambda_function" "investigation_notifier" {
 
   environment {
     variables = {
-      GITHUB_TOKEN_SECRET    = aws_secretsmanager_secret.github_token.arn
-      GITHUB_TICKETS_REPO    = var.github_tickets_repo
-      DEVOPS_AGENT_SPACE_ID  = var.devops_agent_space_id
-      DEVOPS_AGENT_REGION    = data.aws_region.current.name
+      GITHUB_TOKEN_SECRET   = aws_secretsmanager_secret.github_token.arn
+      GITHUB_TICKETS_REPO   = var.github_tickets_repo
+      DEVOPS_AGENT_SPACE_ID = var.devops_agent_space_id
+      DEVOPS_AGENT_REGION   = data.aws_region.current.name
     }
   }
 }
