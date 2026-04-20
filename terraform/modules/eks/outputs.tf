@@ -42,3 +42,18 @@ output "oidc_issuer_host" {
   description = "EKS OIDC issuer hostname without https:// (used in IRSA conditions)."
   value       = replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")
 }
+
+output "ecr_outline_url" {
+  description = "ECR repository URL for Outline."
+  value       = aws_ecr_repository.outline.repository_url
+}
+
+output "ecr_outline_base_url" {
+  description = "ECR repository URL for Outline base image."
+  value       = aws_ecr_repository.outline_base.repository_url
+}
+
+output "github_actions_role_arn" {
+  description = "IAM role ARN for GitHub Actions CI/CD deployment."
+  value       = aws_iam_role.github_actions_deploy.arn
+}

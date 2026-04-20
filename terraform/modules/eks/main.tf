@@ -330,3 +330,147 @@ resource "aws_iam_role_policy" "external_secrets" {
     }]
   })
 }
+
+# --- ECR Repositories ---
+
+resource "aws_ecr_repository" "outline" {
+  name                 = "outline"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_ecr_repository" "outline_base" {
+  name                 = "outline-base"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_ecr_lifecycle_policy" "outline" {
+  repository = aws_ecr_repository.outline.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 20 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 20
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+resource "aws_ecr_lifecycle_policy" "outline_base" {
+  repository = aws_ecr_repository.outline_base.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 base images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+# --- GitHub Actions OIDC for CI/CD ---
+
+data "aws_iam_openid_connect_provider" "github_actions" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
+resource "aws_iam_role" "github_actions_deploy" {
+  name = "${local.cluster_name}-github-actions-deploy"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github_actions.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:JoeShi/outline:*"
+        }
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "github_actions_ecr" {
+  name = "ecr-push"
+  role = aws_iam_role.github_actions_deploy.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ]
+        Resource = [
+          aws_ecr_repository.outline.arn,
+          aws_ecr_repository.outline_base.arn
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["eks:DescribeCluster"]
+        Resource = aws_eks_cluster.main.arn
+      }
+    ]
+  })
+}
+
+# Grant GitHub Actions role access to EKS cluster
+resource "aws_eks_access_entry" "github_actions" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.github_actions_deploy.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "github_actions" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.github_actions_deploy.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type       = "namespace"
+    namespaces = ["outline"]
+  }
+}

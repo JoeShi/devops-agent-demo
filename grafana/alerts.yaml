@@ -1,5 +1,4 @@
 # Prometheus alerting rules for Outline application
-# Loaded by kube-prometheus-stack via additionalPrometheusRules
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -11,27 +10,6 @@ spec:
   groups:
     - name: outline.app
       rules:
-        - alert: OutlineHighErrorRate
-          expr: |
-            sum(rate(http_request_duration_seconds_count{job="outline-web",code=~"5.."}[5m]))
-            / sum(rate(http_request_duration_seconds_count{job="outline-web"}[5m])) > 0.05
-          for: 2m
-          labels:
-            severity: critical
-          annotations:
-            summary: "Outline 5xx error rate above 5%"
-            description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
-
-        - alert: OutlineHighLatency
-          expr: |
-            histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="outline-web"}[5m])) by (le)) > 2
-          for: 3m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Outline P95 latency above 2s"
-            description: "P95 latency is {{ $value }}s."
-
         - alert: OutlinePodCrashLooping
           expr: rate(kube_pod_container_status_restarts_total{namespace="outline"}[15m]) * 60 * 15 > 3
           for: 5m
@@ -39,6 +17,7 @@ spec:
             severity: critical
           annotations:
             summary: "Outline pod {{ $labels.pod }} is crash looping"
+            description: "Pod {{ $labels.pod }} restarted {{ $value | humanize }} times in the last 15 minutes."
 
         - alert: OutlinePodHighMemory
           expr: |
@@ -49,6 +28,55 @@ spec:
             severity: warning
           annotations:
             summary: "Outline pod {{ $labels.pod }} memory usage above 85%"
+            description: "Memory usage is {{ $value | humanizePercentage }} of limit."
+
+        - alert: OutlinePodCPUThrottling
+          expr: |
+            sum(increase(container_cpu_cfs_throttled_periods_total{namespace="outline",container="outline"}[5m]))
+            / sum(increase(container_cpu_cfs_periods_total{namespace="outline",container="outline"}[5m])) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Outline pods CPU throttling above 50%"
+            description: "{{ $value | humanizePercentage }} of CPU periods are being throttled."
+
+        - alert: OutlineReplicasUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="outline",deployment="outline-web"}
+            < kube_deployment_spec_replicas{namespace="outline",deployment="outline-web"}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline web has unavailable replicas"
+
+        - alert: OutlineQueueBacklog
+          expr: outline_queue_tasks_count{env="production"} > 100
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Outline task queue backlog above 100"
+            description: "{{ $value }} tasks pending in queue for over 10 minutes."
+
+        - alert: OutlineQueueDelayed
+          expr: outline_queue_tasks_delayed_count{env="production"} > 50
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Outline delayed tasks above 50"
+            description: "{{ $value }} delayed tasks, worker may be stuck."
+
+        - alert: OutlineTargetDown
+          expr: up{job="outline-web"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline metrics target is down"
+            description: "Prometheus cannot scrape outline-web, pod may be unreachable."
 
     - name: outline.infra
       rules:

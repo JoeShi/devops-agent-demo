@@ -518,6 +518,68 @@ cp github-actions/deploy.yml .github/workflows/deploy.yml
 
 非生产演示环境可使用 `t3.medium` 实例和单可用区部署，费用可降至约 $500/月。
 
+## 第六步：配置 Amazon Federate 登录（可选）
+
+允许亚马逊内部员工通过 Midway 认证登录 Outline 和 Grafana。
+
+### 6a. 在 Amazon Federate 注册 OIDC 应用
+
+1. 前往 Amazon Federate 控制台 → 创建 OIDC 应用
+2. **Client ID**：自定义名称（如 `cmkh-devops-agent-outline-demo-cognito`）
+3. **Redirect URI**：`https://<project_name>-auth.auth.<region>.amazoncognito.com/oauth2/idpresponse`
+4. **Claims**：添加 `email`（映射到 Amazon email）和 `name`（映射到 Display name）
+5. **Client Authentication**：启用 Client Secrets
+6. 记录生成的 Client ID、Client Secret 和 Issuer URL
+
+### 6b. 配置 Terraform 变量
+
+在 `terraform.tfvars` 中添加：
+
+```hcl
+federate_enabled       = true
+federate_client_id     = "<your-federate-client-id>"
+federate_client_secret = "<your-federate-client-secret>"
+federate_issuer_url    = "https://idp-integ.federate.amazon.com"
+```
+
+```bash
+terraform apply -target=module.auth
+```
+
+### 6c. 验证
+
+访问 Outline 或 Grafana 登录页面，应出现 "AmazonFederate" 登录按钮。
+
+## 第七步：配置 Outline CI/CD
+
+PR 合并到 main 后自动构建 Docker 镜像并部署到 EKS。
+
+### 7a. 部署基础设施（ECR + IAM Role）
+
+ECR 仓库和 GitHub Actions OIDC Role 已包含在 Terraform 中：
+
+```bash
+terraform apply -target=module.eks
+```
+
+创建的资源：
+- ECR 仓库：`outline`（保留 20 个镜像）、`outline-base`（保留 10 个）
+- GitHub Actions OIDC IAM Role：仅允许 `repo:JoeShi/outline:*` assume
+- EKS Access Entry：授予该 Role 在 `outline` namespace 的部署权限
+
+### 7b. 一键配置
+
+```bash
+./scripts/setup-outline-cicd.sh
+```
+
+脚本会设置 GitHub Secret（`AWS_DEPLOY_ROLE_ARN`）并推送 workflow 文件到 outline 仓库。
+
+### 7c. 触发方式
+
+- **自动**：PR 合并到 `main` → 构建镜像推送 ECR → 滚动更新 EKS（outline-web + outline-worker）
+- **手动**：GitHub Actions → Run workflow → 指定已有 image tag 直接部署
+
 ## 清理
 
 ```bash
