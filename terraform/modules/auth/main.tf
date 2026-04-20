@@ -42,6 +42,32 @@ resource "aws_cognito_user_pool_domain" "main" {
   user_pool_id = aws_cognito_user_pool.main.id
 }
 
+# Amazon Federate OIDC Identity Provider
+resource "aws_cognito_identity_provider" "federate" {
+  count         = var.federate_enabled ? 1 : 0
+  user_pool_id  = aws_cognito_user_pool.main.id
+  provider_name = "AmazonFederate"
+  provider_type = "OIDC"
+
+  provider_details = {
+    client_id                = var.federate_client_id
+    client_secret            = var.federate_client_secret
+    oidc_issuer              = var.federate_issuer_url
+    authorize_scopes         = "openid email profile"
+    attributes_request_method = "GET"
+  }
+
+  attribute_mapping = {
+    email    = "email"
+    name     = "name"
+    username = "sub"
+  }
+}
+
+locals {
+  identity_providers = var.federate_enabled ? ["COGNITO", "AmazonFederate"] : ["COGNITO"]
+}
+
 resource "aws_cognito_user_pool_client" "outline" {
   name         = "outline"
   user_pool_id = aws_cognito_user_pool.main.id
@@ -50,7 +76,7 @@ resource "aws_cognito_user_pool_client" "outline" {
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = ["openid", "profile", "email"]
-  supported_identity_providers         = ["COGNITO"]
+  supported_identity_providers         = local.identity_providers
   callback_urls                        = ["${var.outline_url}/auth/oidc.callback"]
   logout_urls                          = [var.outline_url]
 
@@ -58,6 +84,8 @@ resource "aws_cognito_user_pool_client" "outline" {
     "ALLOW_USER_SRP_AUTH",
     "ALLOW_REFRESH_TOKEN_AUTH",
   ]
+
+  depends_on = [aws_cognito_identity_provider.federate]
 }
 
 resource "aws_cognito_user_pool_client" "grafana" {
@@ -68,7 +96,7 @@ resource "aws_cognito_user_pool_client" "grafana" {
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = ["openid", "profile", "email"]
-  supported_identity_providers         = ["COGNITO"]
+  supported_identity_providers         = local.identity_providers
   callback_urls                        = ["${var.grafana_url}/login/generic_oauth"]
   logout_urls                          = [var.grafana_url]
 
@@ -76,4 +104,6 @@ resource "aws_cognito_user_pool_client" "grafana" {
     "ALLOW_USER_SRP_AUTH",
     "ALLOW_REFRESH_TOKEN_AUTH",
   ]
+
+  depends_on = [aws_cognito_identity_provider.federate]
 }

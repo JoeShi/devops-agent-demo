@@ -137,7 +137,13 @@ resource "helm_release" "kube_prometheus_stack" {
           {
             server = var.grafana_root_url != "" ? {
               root_url = var.grafana_root_url
+              domain   = var.grafana_host
             } : {}
+            users = {
+              allow_sign_up        = false
+              auto_assign_org      = true
+              auto_assign_org_role = "Viewer"
+            }
           },
           var.grafana_oauth_enabled ? {
             "auth.generic_oauth" = {

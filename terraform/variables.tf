@@ -154,3 +154,30 @@ variable "grafana_alb_dns_name" {
   type        = string
   default     = ""
 }
+
+# --- Amazon Federate OIDC ---
+
+variable "federate_enabled" {
+  description = "Enable Amazon Federate as OIDC identity provider in Cognito."
+  type        = bool
+  default     = false
+}
+
+variable "federate_client_id" {
+  description = "Amazon Federate OIDC client ID."
+  type        = string
+  default     = ""
+}
+
+variable "federate_client_secret" {
+  description = "Amazon Federate OIDC client secret."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "federate_issuer_url" {
+  description = "Amazon Federate OIDC issuer URL."
+  type        = string
+  default     = ""
+}
