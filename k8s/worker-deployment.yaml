@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: outline-worker
-          image: outlinewiki/outline:1.6.1
+          image: 604179600882.dkr.ecr.us-east-1.amazonaws.com/outline:c55e0983ec0fbce4da9b3a2626b38188f3215f52
           command: ["node", "build/server/index.js", "--services=worker"]
           envFrom:
             - secretRef:
