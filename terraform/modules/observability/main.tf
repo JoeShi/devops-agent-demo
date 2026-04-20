@@ -107,6 +107,20 @@ resource "helm_release" "kube_prometheus_stack" {
           }]
         }
       }
+      prometheus = {
+        prometheusSpec = {
+          resources = {
+            requests = {
+              cpu    = "500m"
+              memory = "1Gi"
+            }
+            limits = {
+              cpu    = "2"
+              memory = "3Gi"
+            }
+          }
+        }
+      }
       grafana = {
         plugins = ["grafana-opensearch-datasource"]
         sidecar = {
