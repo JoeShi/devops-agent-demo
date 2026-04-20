@@ -8,6 +8,11 @@ output "feishu_bot_role_arn" {
   value       = aws_iam_role.feishu_bot.arn
 }
 
+output "wecom_bot_role_arn" {
+  description = "IRSA role ARN for wecom-bot EKS Pod — used by k8s/wecom-bot-deployment.yaml ServiceAccount annotation."
+  value       = aws_iam_role.wecom_bot.arn
+}
+
 output "grafana_alerts_sns_topic_arn" {
   description = "SNS topic ARN for Grafana Alertmanager integration."
   value       = aws_sns_topic.grafana_alerts.arn
