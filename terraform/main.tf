@@ -192,4 +192,10 @@ module "auth" {
   project_name = var.project_name
   outline_url  = "https://${var.outline_domain}"
   grafana_url  = "https://${var.grafana_host}"
+
+  # Amazon Federate OIDC
+  federate_enabled       = var.federate_enabled
+  federate_client_id     = var.federate_client_id
+  federate_client_secret = var.federate_client_secret
+  federate_issuer_url    = var.federate_issuer_url
 }

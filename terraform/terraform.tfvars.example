@@ -31,3 +31,9 @@ devops_agent_space_id = ""
 # CDN / Domain
 outline_domain    = "outline.devops-agent.xyz"
 route53_zone_name = "devops-agent.xyz"
+
+# Amazon Federate OIDC (for internal Amazon employee login)
+federate_enabled       = false
+federate_client_id     = ""
+federate_client_secret = ""
+federate_issuer_url    = "https://idp-integ.federate.amazon.com"
