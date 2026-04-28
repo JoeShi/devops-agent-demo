@@ -158,6 +158,7 @@ resource "helm_release" "kube_prometheus_stack" {
             "alb.ingress.kubernetes.io/listen-ports"    = "[{\"HTTPS\":443}]"
             "alb.ingress.kubernetes.io/certificate-arn" = var.grafana_certificate_arn
             "alb.ingress.kubernetes.io/ssl-redirect"    = "443"
+            "alb.ingress.kubernetes.io/healthcheck-path" = "/api/health"
             "alb.ingress.kubernetes.io/group.name"      = "outline"
           } : {}
         }
