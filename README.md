@@ -463,9 +463,9 @@ kubectl logs -n outline -l app=feishu-bot
 
 ### 3e. 企业微信 Bot (WeCom) — SRE 对话（双向通信）
 
-企业微信 Bot 以长连接 WebSocket Pod 形式运行在 EKS 中，通过 IRSA 调用 DevOps Agent Chat API。与飞书 Bot（3d）架构对称，唯一区别是协议层：飞书有官方 `lark-oapi` SDK，企业微信 aibot 长连接目前没有官方 Python SDK，因此我们用原始 `websockets` 库 + WeCom 自定义 JSON 帧（`aibot_subscribe` / `aibot_msg_callback` / `aibot_respond_msg` / `aibot_send_msg`）直接接入。
+企业微信 Bot 以长连接 WebSocket Pod 形式运行在 EKS 中，通过 IRSA 调用 DevOps Agent Chat API。与飞书 Bot（3d）架构对称：飞书端用官方 `lark-oapi` SDK，企业微信端用官方 [`wecom-aibot-python-sdk`](https://github.com/WecomTeam/wecom-aibot-python-sdk)（由 WecomTeam/Tencent 维护，PyPI `wecom-aibot-python-sdk>=1.0.2`），SDK 负责订阅 / 心跳 / 重连 / 回执等协议细节，我们只在 `@ws_client.on("message.text")` 回调里转发到 DevOps Agent。
 
-> WeCom 服务器会把 RFC 6455 ping 判定为 `PROTOCOL_ERROR 1002`（"incorrect masking"），所以 `websockets.connect(url, ping_interval=None)` 必须显式关闭库级心跳；订阅会话本身足够长寿，断线后由重连循环在 ~1s 内恢复。
+> SDK 已内置正确的心跳协议（JSON `{"cmd":"ping"}`，而非 RFC 6455 ping）和指数退避重连（`max_reconnect_attempts=-1` 表示无限重连），订阅会话断线后由 SDK 自动恢复。
 
 #### 3e-1. 创建企业微信 aibot
 
