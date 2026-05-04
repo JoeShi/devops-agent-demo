@@ -110,6 +110,7 @@ module "data_stores" {
   opensearch_instance_type   = var.opensearch_instance_type
   opensearch_instance_count  = var.opensearch_instance_count
   opensearch_master_password = var.opensearch_master_password
+  db_password                = var.db_password
 }
 
 module "observability" {

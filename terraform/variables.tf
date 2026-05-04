@@ -72,6 +72,12 @@ variable "opensearch_master_password" {
   default     = "Admin1234!"
 }
 
+variable "db_password" {
+  description = "RDS master user password for outline_admin."
+  type        = string
+  sensitive   = true
+}
+
 variable "grafana_host" {
   description = "Hostname for Grafana ingress."
   type        = string
