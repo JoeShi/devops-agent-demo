@@ -265,6 +265,49 @@ resource "aws_iam_role_policy" "wecom_bot_devops_agent" {
   })
 }
 
+# --- IRSA: dingtalk-bot EKS Pod → aidevops Chat API ---
+# Bot 以 DingTalk Stream 长连接模式运行在 EKS 中，通过 IRSA 获取调用 DevOps Agent 的权限。
+# 与 feishu-bot / wecom-bot 平行。
+
+resource "aws_iam_role" "dingtalk_bot" {
+  name = "${var.eks_cluster_name}-dingtalk-bot-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = var.oidc_provider_arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${var.oidc_issuer_host}:sub" = "system:serviceaccount:outline:dingtalk-bot"
+          "${var.oidc_issuer_host}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+
+  tags = { ManagedBy = "terraform" }
+}
+
+resource "aws_iam_role_policy" "dingtalk_bot_devops_agent" {
+  name = "devops-agent-chat"
+  role = aws_iam_role.dingtalk_bot.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "aidevops:CreateChat",
+        "aidevops:SendMessage",
+        "aidevops:ListChats",
+      ]
+      Resource = "arn:aws:aidevops:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:agentspace/${var.devops_agent_space_id}"
+    }]
+  })
+}
+
 # ---------------------------------------------------------------------------
 # AWS DevOps Agent — Private Connection (VPC Lattice)
 #
