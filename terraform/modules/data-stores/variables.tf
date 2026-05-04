@@ -48,3 +48,9 @@ variable "opensearch_master_password" {
   type        = string
   sensitive   = true
 }
+
+variable "db_password" {
+  description = "RDS master user password."
+  type        = string
+  sensitive   = true
+}

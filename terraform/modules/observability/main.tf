@@ -81,6 +81,23 @@ resource "helm_release" "kube_prometheus_stack" {
 
   values = [
     yamlencode({
+      # Disable monitoring for EKS-managed control plane components
+      # (not accessible on managed EKS, causes false-positive alerts)
+      kubeScheduler = {
+        enabled = false
+      }
+      kubeControllerManager = {
+        enabled = false
+      }
+      # Suppress KubeVersionMismatch — expected on EKS with mixed component versions
+      kubernetesServiceMonitors = {
+        additionalRulesOverrides = {}
+      }
+      defaultRules = {
+        disabled = {
+          KubeVersionMismatch = true
+        }
+      }
       alertmanager = {
         serviceAccount = {
           annotations = {
@@ -94,17 +111,26 @@ resource "helm_release" "kube_prometheus_stack" {
             group_wait      = "30s"
             group_interval  = "5m"
             repeat_interval = "4h"
-          }
-          receivers = [{
-            name = "sns-feishu"
-            sns_configs = [{
-              topic_arn     = var.alertmanager_sns_topic_arn
-              send_resolved = true
-              sigv4 = {
-                region = "us-east-1"
-              }
+            routes = [{
+              receiver = "null"
+              matchers = ["alertname = Watchdog"]
             }]
-          }]
+          }
+          receivers = [
+            {
+              name = "sns-feishu"
+              sns_configs = [{
+                topic_arn     = var.alertmanager_sns_topic_arn
+                send_resolved = true
+                sigv4 = {
+                  region = "us-east-1"
+                }
+              }]
+            },
+            {
+              name = "null"
+            }
+          ]
         }
       }
       prometheus = {
