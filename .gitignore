@@ -1,9 +1,11 @@
 .agents/
 .claude/
 .kiro/
+.DS_Store
 terraform/.terraform/
 terraform/*.tfstate*
 terraform/terraform.tfvars
+terraform/tfplan
 terraform/errored.tfstate
 terraform/modules/integration/lambda/.build/
 opencode.json

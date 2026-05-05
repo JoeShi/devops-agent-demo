@@ -250,7 +250,7 @@ def _open_connection() -> dict:
         "clientId": DINGTALK_APP_KEY,
         "clientSecret": DINGTALK_APP_SECRET,
         "subscriptions": [
-            {"type": "EVENT", "topic": "/v1.0/im/bot/messages/get"},
+            {"type": "CALLBACK", "topic": "/v1.0/im/bot/messages/get"},
         ],
     }).encode("utf-8")
     req = urllib.request.Request(

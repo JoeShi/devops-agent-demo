@@ -42,9 +42,14 @@ resource "aws_cognito_user_pool" "main" {
 }
 
 resource "aws_cognito_user_pool_domain" "main" {
+  # NOTE: Cognito custom domains are globally unique across ALL AWS accounts.
+  # If deploying to a personal account and this domain is already taken,
+  # append your account ID: "${var.project_name}-auth-${data.aws_caller_identity.current.account_id}"
   domain       = "${var.project_name}-auth"
   user_pool_id = aws_cognito_user_pool.main.id
 }
+
+data "aws_caller_identity" "current" {}
 
 # Amazon Federate OIDC Identity Provider
 resource "aws_cognito_identity_provider" "federate" {

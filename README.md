@@ -2,6 +2,8 @@
 
 在 EKS 上部署 Outline Wiki，集成完整的可观测性方案（Prometheus + Grafana + OpenSearch）以及 AWS DevOps Agent。包含飞书通知和故障注入脚本，用于现场演示场景。
 
+> 首次部署请先阅读 [docs/deployment-notes.md](docs/deployment-notes.md) 了解常见问题和注意事项。
+
 ## 架构
 
 ```
@@ -15,7 +17,8 @@ Internet ─→ Route53 ─→ CloudFront ─→ ALB ─→ EKS    │
                                           │  ├── Outline Worker
                                           │  ├── Prometheus + Grafana ←─┘ (OAuth login)
                                           │  ├── Fluent Bit → OpenSearch
-                                          │  └── Feishu Bot Pod (WebSocket + IRSA)
+                                          │  ├── Feishu Bot Pod (WebSocket + IRSA)
+                                          │  └── DingTalk Bot Pod (Stream + IRSA)
                                           │
 Internet ─→ Route53 ─→ ALB (HTTPS) ──────┘
   (grafana.devops-agent.xyz)
@@ -83,7 +86,13 @@ EventBridge (aws.aidevops) → Lambda (investigation_notifier)
 │   ├── deployment.yaml           # Outline web (3 replicas)
 │   ├── worker-deployment.yaml    # Outline worker
 │   ├── feishu-bot-deployment.yaml # Feishu Bot (WebSocket + IRSA)
+│   ├── wecom-bot-deployment.yaml  # WeCom Bot (WebSocket + IRSA)
+│   ├── dingtalk-bot-deployment.yaml # DingTalk Bot (Stream + IRSA)
 │   ├── feishu-bot/               # Bot source code + Dockerfile
+│   │   ├── app.py
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   ├── dingtalk-bot/             # DingTalk Bot source code + Dockerfile
 │   │   ├── app.py
 │   │   ├── Dockerfile
 │   │   └── requirements.txt
@@ -112,7 +121,7 @@ EventBridge (aws.aidevops) → Lambda (investigation_notifier)
 - Helm 3
 - 已启用 Actions 的 GitHub 仓库
 - 飞书机器人（需要 webhook URL 用于通知，以及应用凭证用于双向对话）
-- Docker（用于构建飞书 Bot 镜像）
+- Docker Desktop 或 Finch（用于构建 Bot 镜像）
 
 ## 第一步：部署基础设施
 
@@ -588,6 +597,8 @@ WeCom WS ──▶ User
 
 DingTalk Stream 协议流程：Bot 先 POST `/v1.0/gateway/connections/open` 获取 WebSocket endpoint + ticket → 连接 WebSocket → 接收 SYSTEM/CALLBACK/PING 事件 → 通过 OpenAPI 发送回复消息。
 
+Gateway 订阅配置：`{"type": "CALLBACK", "topic": "/v1.0/im/bot/messages/get"}`（注意类型是 CALLBACK 而非 EVENT）。
+
 #### 3f-1. 创建钉钉应用
 
 1. 前往 [钉钉开放平台](https://open-dev.dingtalk.com) → 创建企业内部应用
@@ -743,7 +754,7 @@ cp github-actions/deploy.yml .github/workflows/deploy.yml
 
 **GitHub Issues 作为工单系统**：事件会在 [devops-agent-demo-tickets](https://github.com/JoeShi/devops-agent-demo-tickets) 中创建 GitHub Issue。GitHub Actions 工作流调用 `aws devops-agent create-backlog-task` 并通过 `--reference` 指向该 Issue，将调查与工单关联。EventBridge（`aws.aidevops`）将所有调查状态变更路由到 Lambda，Lambda 将评论写回 Issue——包括 operator web URL 和最终根因摘要。
 
-**飞书双重集成**：EventBridge → Lambda 用于单向告警通知；EKS Pod（WebSocket + IRSA）用于通过 DevOps Agent Chat API 进行双向 SRE 对话。无公网端点——Lambda 仅由 EventBridge 调用。
+**IM 多平台集成（飞书/企微/钉钉）**：EventBridge → Lambda 用于单向告警通知；EKS Pod（WebSocket/Stream + IRSA）用于通过 DevOps Agent Chat API 进行双向 SRE 对话。三个 Bot 架构对称，均无需公网回调端点——飞书用 lark-oapi WebSocket，企微用原始 websockets + aibot 协议，钉钉用 Stream 模式（gateway/connections/open + CALLBACK）。
 
 ## 预估成本
 
@@ -835,3 +846,5 @@ kubectl delete -k k8s/
 cd terraform
 terraform destroy
 ```
+
+> Bot ECR 仓库需要单独删除：`aws ecr delete-repository --repository-name dingtalk-bot --force`

@@ -316,7 +316,7 @@ resource "aws_iam_role_policy" "dingtalk_bot_devops_agent" {
 # ---------------------------------------------------------------------------
 
 resource "null_resource" "devops_agent_private_connection" {
-  count = var.vpc_id != "" ? 1 : 0
+  count = var.enable_private_connection && var.vpc_id != "" ? 1 : 0
 
   triggers = {
     connection_name = var.private_connection_name
@@ -411,6 +411,7 @@ resource "null_resource" "devops_agent_private_connection" {
 # The resulting serviceId is stored in SSM Parameter Store so that the
 # associate step can reference it without Terraform interpolation.
 resource "null_resource" "devops_agent_grafana_register" {
+  count      = var.enable_grafana_registration ? 1 : 0
   depends_on = [null_resource.devops_agent_private_connection]
 
   triggers = {
@@ -495,6 +496,7 @@ resource "null_resource" "devops_agent_grafana_register" {
 
 # Step 2 – Associate Grafana with the outline Agent Space
 resource "null_resource" "devops_agent_grafana_associate" {
+  count      = var.enable_grafana_registration ? 1 : 0
   depends_on = [null_resource.devops_agent_grafana_register]
 
   triggers = {
