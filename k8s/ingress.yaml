@@ -10,9 +10,12 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-path: /_health
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/certificate-arn: "${ACM_CERTIFICATE_ARN}"  # from: terraform output acm_certificate_arn
+    # Replace with your ACM certificate ARN from: terraform output -raw acm_certificate_arn
+    # Or find it: aws acm list-certificates --query "CertificateSummaryList[?DomainName=='alb-<YOUR_DOMAIN>'].CertificateArn"
+    alb.ingress.kubernetes.io/certificate-arn: "${ACM_CERTIFICATE_ARN}"
 spec:
   rules:
+    # Primary domain — matches CloudFront origin requests (Host: alb-<domain>)
     - host: alb-outline.devops-agent.xyz
       http:
         paths:
@@ -23,6 +26,7 @@ spec:
                 name: outline-web
                 port:
                   number: 80
+    # Direct ALB access domain
     - host: outline.devops-agent.xyz
       http:
         paths:

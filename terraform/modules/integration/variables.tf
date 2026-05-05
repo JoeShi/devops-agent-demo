@@ -123,3 +123,15 @@ variable "github_tickets_repo_name" {
   type        = string
   default     = "devops-agent-demo-tickets"
 }
+
+variable "enable_private_connection" {
+  description = "Whether to create the DevOps Agent private connection (VPC Lattice). Set to false for first-time deploy when vpc_id is not yet known."
+  type        = bool
+  default     = true
+}
+
+variable "enable_grafana_registration" {
+  description = "Whether to register Grafana with DevOps Agent. Set to true only after Grafana is deployed and SA token is populated."
+  type        = bool
+  default     = true
+}
