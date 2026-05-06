@@ -2,6 +2,8 @@
 
 在 EKS 上部署 Outline Wiki，集成完整的可观测性方案（Prometheus + Grafana + OpenSearch）以及 AWS DevOps Agent。包含飞书通知和故障注入脚本，用于现场演示场景。
 
+> 首次部署请先阅读 [docs/deployment-notes.md](docs/deployment-notes.md) 了解常见问题和注意事项。
+
 ## 架构
 
 ```
@@ -15,7 +17,8 @@ Internet ─→ Route53 ─→ CloudFront ─→ ALB ─→ EKS    │
                                           │  ├── Outline Worker
                                           │  ├── Prometheus + Grafana ←─┘ (OAuth login)
                                           │  ├── Fluent Bit → OpenSearch
-                                          │  └── Feishu Bot Pod (WebSocket + IRSA)
+                                          │  ├── Feishu Bot Pod (WebSocket + IRSA)
+                                          │  └── DingTalk Bot Pod (Stream + IRSA)
                                           │
 Internet ─→ Route53 ─→ ALB (HTTPS) ──────┘
   (grafana.devops-agent.xyz)
@@ -83,7 +86,13 @@ EventBridge (aws.aidevops) → Lambda (investigation_notifier)
 │   ├── deployment.yaml           # Outline web (3 replicas)
 │   ├── worker-deployment.yaml    # Outline worker
 │   ├── feishu-bot-deployment.yaml # Feishu Bot (WebSocket + IRSA)
+│   ├── wecom-bot-deployment.yaml  # WeCom Bot (WebSocket + IRSA)
+│   ├── dingtalk-bot-deployment.yaml # DingTalk Bot (Stream + IRSA)
 │   ├── feishu-bot/               # Bot source code + Dockerfile
+│   │   ├── app.py
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   ├── dingtalk-bot/             # DingTalk Bot source code + Dockerfile
 │   │   ├── app.py
 │   │   ├── Dockerfile
 │   │   └── requirements.txt
@@ -112,7 +121,7 @@ EventBridge (aws.aidevops) → Lambda (investigation_notifier)
 - Helm 3
 - 已启用 Actions 的 GitHub 仓库
 - 飞书机器人（需要 webhook URL 用于通知，以及应用凭证用于双向对话）
-- Docker（用于构建飞书 Bot 镜像）
+- Docker Desktop 或 Finch（用于构建 Bot 镜像）
 
 ## 第一步：部署基础设施
 
@@ -582,6 +591,132 @@ WeCom WS ──▶ User
 | 长 Mermaid/表格被截断且不分页 | 单行 UTF-8 字节 > 3500 | app.py 的 `split_utf8_chunks` 会在字符边界硬切；这是预期行为，但对 Mermaid 语法不友好，必要时让 Agent 用 `---` 分段输出 |
 | WS 断开后迟迟不重连 | 所在 EKS 节点 DNS 故障或出站阻断 | 检查 `kubectl exec -n outline deploy/wecom-bot -- nslookup openws.work.weixin.qq.com`；必要时确认 NAT 出口到 qq.com 443 未被策略拦 |
 
+### 3f. 钉钉 Bot (DingTalk) — SRE 对话（双向通信）
+
+钉钉 Bot 以 DingTalk Stream 长连接模式运行在 EKS 中，通过 IRSA 调用 DevOps Agent Chat API。与飞书 Bot（3d）和企微 Bot（3e）架构对称。
+
+DingTalk Stream 协议流程：Bot 先 POST `/v1.0/gateway/connections/open` 获取 WebSocket endpoint + ticket → 连接 WebSocket → 接收 SYSTEM/CALLBACK/PING 事件 → 通过 OpenAPI 发送回复消息。
+
+Gateway 订阅配置：`{"type": "CALLBACK", "topic": "/v1.0/im/bot/messages/get"}`（注意类型是 CALLBACK 而非 EVENT）。
+
+#### 3f-1. 创建钉钉应用
+
+1. 前往 [钉钉开放平台](https://open-dev.dingtalk.com) → 创建企业内部应用
+2. 添加「机器人」能力
+3. 在「机器人与消息推送」中启用 **Stream 模式**（长连接接收消息）
+4. 记录 **App Key** 和 **App Secret**
+5. 需要申请权限：`qyapi_robot_sendmsg`（用于主动发送消息）
+6. 发布应用上线，将机器人添加到目标群聊
+
+> 钉钉 Stream 模式与企微 aibot 长连接类似：Bot 主动连接钉钉 WebSocket，无需公网回调 URL。
+
+#### 3f-2. 创建 Secrets Manager 密钥
+
+```bash
+aws secretsmanager create-secret \
+  --name outline/dingtalk-bot \
+  --region us-east-1 \
+  --secret-string '{
+    "DINGTALK_APP_KEY": "<your-app-key>",
+    "DINGTALK_APP_SECRET": "<your-app-secret>",
+    "DEVOPS_AGENT_SPACE_ID": "<your-agent-space-id>"
+  }'
+```
+
+`k8s/dingtalk-bot-deployment.yaml` 中的 ExternalSecret 会自动同步为同名 K8s Secret；Pod 通过 `envFrom` 注入这三个变量。
+
+#### 3f-3. 部署 IRSA 角色（Terraform）
+
+Terraform `modules/integration` 中已定义 `aws_iam_role.dingtalk_bot`（信任 OIDC，授权 `aidevops:CreateChat` / `SendMessage` / `ListChats` 到目标 Agent Space），只需 apply：
+
+```bash
+cd terraform
+terraform apply -target=module.integration.aws_iam_role.dingtalk_bot \
+               -target=module.integration.aws_iam_role_policy.dingtalk_bot_devops_agent
+```
+
+输出的 `dingtalk_bot_role_arn` 应为 `arn:aws:iam::<account>:role/outline-demo-eks-dingtalk-bot-role`，ServiceAccount 注解已在 `k8s/dingtalk-bot-deployment.yaml` 中配置。
+
+#### 3f-4. 构建并推送 Bot 镜像
+
+```bash
+# Create ECR repo (first time only)
+aws ecr create-repository --repository-name dingtalk-bot --region us-east-1
+
+# Authenticate Docker to ECR
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
+
+# Build (must be linux/amd64 for EKS) and push
+docker build --platform linux/amd64 \
+  -t <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/dingtalk-bot:latest k8s/dingtalk-bot/
+docker push <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/dingtalk-bot:latest
+```
+
+镜像布局和 `k8s/wecom-bot/` 完全对称：`python:3.12-slim` + 非 root UID 1000 + `requirements.txt` 只含 `websockets>=12.0` 和 `boto3>=1.34.0`。
+
+#### 3f-5. 部署
+
+```bash
+kubectl apply -f k8s/dingtalk-bot-deployment.yaml
+```
+
+验证：
+
+```bash
+# Pod should be Running
+kubectl get pods -n outline -l app=dingtalk-bot
+
+# Logs should show Stream connected
+kubectl logs -n outline -l app=dingtalk-bot -f
+# Expected:
+#   Starting DingTalk Bot Stream client …
+#   Gateway connection opened: endpoint=wss://...
+#   Connected to DingTalk Stream
+```
+
+在群里 @机器人 并发送一条消息，Pod 日志应该连续出现：
+1. `Received [<session>]: <你发的内容>` — 收到 CALLBACK 事件
+2. `Created execution <exec-id>` — 首次消息创建 DevOps Agent `executionId`
+3. `Reply [<session>]: <agent 回复前 200 字符>` — 调用 `send_message` 拿到 EventStream 后落地
+4. `Group message sent: openConversationId=...` — 通过 OpenAPI 发送回复
+
+超过 3500 字节的长回复会被拆分并以 `（i/N）` 前缀。
+
+#### 3f-6. 架构图
+
+```
+User (钉钉群聊)
+      │  @dingtalk-bot <question>
+      ▼
+DingTalk Stream  wss://... (gateway/connections/open)
+      │  CALLBACK event (bot message)
+      ▼
+dingtalk-bot Pod  (EKS, IRSA)
+      │  ACK callback → 200 OK
+      │
+      │  boto3.devops-agent.create_chat / send_message
+      ▼
+AWS DevOps Agent Space  (us-east-1)
+      │  EventStream: contentBlockStart/Delta/Stop + responseFailed
+      ▼
+dingtalk-bot Pod  (解析 EventStream → 拆分 3500B)
+      │  OpenAPI /v1.0/robot/groupMessages/send  markdown
+      ▼
+DingTalk ──▶ User
+```
+
+#### 3f-7. 故障排查
+
+| 症状 | 原因 | 修复方法 |
+|------|------|----------|
+| Gateway 返回 `incomplete response` | App Key/Secret 错误或应用未发布 | 检查 Secrets Manager 中的凭证；确认钉钉应用已发布上线 |
+| WebSocket 连接后立即断开 | Stream 模式未启用 | 在钉钉开放平台「机器人与消息推送」中确认已启用 Stream 模式 |
+| `botocore.exceptions.ClientError: AccessDenied … aidevops:CreateChat` | IRSA 角色的资源 ARN 不匹配 | 检查 `kubectl -n outline get sa dingtalk-bot -o yaml` 的注解是否指向 Terraform 的 `dingtalk_bot_role_arn` |
+| 群里收到 `（DevOps Agent 未返回内容）` | Agent send_message 返回了事件但没有 text 增量 | 检查 `kubectl logs` 里 EventStream 的 `contentBlockStart` 类型 |
+| 群消息发送失败 `status=403` | access_token 过期或权限不足 | 检查 Pod 日志中 token 刷新是否正常；确认已申请 `qyapi_robot_sendmsg` 权限 |
+| WS 断开后迟迟不重连 | EKS 节点 DNS 故障或出站阻断 | 检查 `kubectl exec -n outline deploy/dingtalk-bot -- nslookup api.dingtalk.com`；确认 NAT 出口到 dingtalk.com 443 未被策略拦 |
+
 ## 第四步：配置 CI/CD
 
 将工作流文件复制到你的仓库：
@@ -619,7 +754,7 @@ cp github-actions/deploy.yml .github/workflows/deploy.yml
 
 **GitHub Issues 作为工单系统**：事件会在 [devops-agent-demo-tickets](https://github.com/JoeShi/devops-agent-demo-tickets) 中创建 GitHub Issue。GitHub Actions 工作流调用 `aws devops-agent create-backlog-task` 并通过 `--reference` 指向该 Issue，将调查与工单关联。EventBridge（`aws.aidevops`）将所有调查状态变更路由到 Lambda，Lambda 将评论写回 Issue——包括 operator web URL 和最终根因摘要。
 
-**飞书双重集成**：EventBridge → Lambda 用于单向告警通知；EKS Pod（WebSocket + IRSA）用于通过 DevOps Agent Chat API 进行双向 SRE 对话。无公网端点——Lambda 仅由 EventBridge 调用。
+**IM 多平台集成（飞书/企微/钉钉）**：EventBridge → Lambda 用于单向告警通知；EKS Pod（WebSocket/Stream + IRSA）用于通过 DevOps Agent Chat API 进行双向 SRE 对话。三个 Bot 架构对称，均无需公网回调端点——飞书用 lark-oapi WebSocket，企微用原始 websockets + aibot 协议，钉钉用 Stream 模式（gateway/connections/open + CALLBACK）。
 
 ## 预估成本
 
@@ -711,3 +846,5 @@ kubectl delete -k k8s/
 cd terraform
 terraform destroy
 ```
+
+> Bot ECR 仓库需要单独删除：`aws ecr delete-repository --repository-name dingtalk-bot --force`

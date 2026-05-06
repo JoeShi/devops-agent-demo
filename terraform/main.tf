@@ -153,11 +153,13 @@ module "integration" {
   route53_zone_id       = module.cdn.route53_zone_id
 
   # Grafana DevOps Agent capability
+  enable_grafana_registration = true
   grafana_url                 = "https://${var.grafana_host}"
   grafana_service_name        = "outline-grafana"
   grafana_sa_token_secret_arn = module.observability.grafana_sa_token_secret_arn
 
   # Private connection (VPC Lattice)
+  enable_private_connection = true
   private_connection_name = "outline-vpc-private"
   vpc_id                  = module.vpc.vpc_id
   private_subnet_ids      = module.vpc.private_subnet_ids
