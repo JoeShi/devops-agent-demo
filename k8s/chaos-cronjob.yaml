@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chaos-runner
+  namespace: outline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chaos-runner
+  namespace: outline
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete", "get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "replicasets"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chaos-runner
+  namespace: outline
+subjects:
+  - kind: ServiceAccount
+    name: chaos-runner
+    namespace: outline
+roleRef:
+  kind: Role
+  name: chaos-runner
+  apiGroup: rbac.authorization.k8s.io
+---
+# Scenario: Redis cascade failure → Pod CrashLoop
+# 1. Block Redis via NetworkPolicy (root cause for Agent to find)
+# 2. Patch deployment with bad env to force CrashLoopBackOff
+# 3. Wait for OutlinePodCrashLooping (critical) → SNS → Lambda → GitHub Issue → Agent
+# 4. Rollback deployment + remove NetworkPolicy
+# Runs every 4 hours, total duration ~12 minutes
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: chaos-redis-failure
+  namespace: outline
+  labels:
+    app: chaos
+    scenario: redis-failure
+spec:
+  schedule: "0 */4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: chaos-runner
+          restartPolicy: Never
+          containers:
+            - name: chaos
+              image: public.ecr.aws/bitnami/kubectl:1.33
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "=== [$(date)] CHAOS: Redis Failure + CrashLoop ==="
+
+                  # Phase 1: Block Redis (this is the root cause Agent should find)
+                  echo "[$(date)] Phase 1: Blocking Redis port 6379"
+                  cat <<'EOF' | kubectl apply -n outline -f -
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: block-redis
+                    namespace: outline
+                    labels:
+                      app: chaos
+                  spec:
+                    podSelector:
+                      matchLabels:
+                        app: outline
+                    policyTypes:
+                      - Egress
+                    egress:
+                      - to:
+                          - ipBlock:
+                              cidr: 0.0.0.0/0
+                        ports:
+                          - {protocol: TCP, port: 443}
+                          - {protocol: TCP, port: 5432}
+                          - {protocol: TCP, port: 53}
+                          - {protocol: UDP, port: 53}
+                  EOF
+
+                  # Phase 2: Inject crash — add env that makes Outline fail on startup
+                  # REDIS_URL override to a non-routable address causes immediate crash
+                  echo "[$(date)] Phase 2: Patching deployment to inject Redis connection failure"
+                  kubectl patch deployment outline-web -n outline --type=json -p='[
+                    {"op":"add","path":"/spec/template/metadata/annotations/chaos-injected","value":"'$(date -u +%Y%m%dT%H%M%SZ)'"},
+                    {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"REDIS_URL","value":"redis://10.255.255.1:6379"}}
+                  ]'
+                  echo "[$(date)] Deployment patched. Pods will CrashLoop on Redis connect timeout."
+
+                  # Phase 3: Wait for CrashLoop alert to fire
+                  # OutlinePodCrashLooping: rate > 3 restarts/15m, for: 5m
+                  # Need ~7 min: restarts accumulate + 5m for duration
+                  echo "[$(date)] Phase 3: Waiting 8 min for alerts to fire and propagate"
+                  sleep 480
+
+                  # Phase 4: Rollback
+                  echo "[$(date)] Phase 4: Rolling back deployment"
+                  kubectl rollout undo deployment/outline-web -n outline
+                  kubectl delete networkpolicy block-redis -n outline --ignore-not-found
+                  kubectl rollout status deployment/outline-web -n outline --timeout=180s
+                  echo "[$(date)] CHAOS COMPLETE. Service restored."

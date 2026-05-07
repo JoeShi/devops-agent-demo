@@ -78,10 +78,57 @@ def handler(event, context):
 
     # SNS invocation (from Alertmanager SNS receiver)
     if "Records" in event and event["Records"][0].get("EventSource") == "aws:sns":
-        body = json.loads(event["Records"][0]["Sns"]["Message"])
-        return _handle_alertmanager(body)
+        message = event["Records"][0]["Sns"]["Message"]
+        try:
+            body = json.loads(message)
+            return _handle_alertmanager(body)
+        except (json.JSONDecodeError, ValueError):
+            # Alertmanager SNS sends plain text, not JSON
+            return _handle_alertmanager_text(message)
 
     return _handle_eventbridge(event)
+
+
+def _handle_alertmanager_text(text):
+    """Parse plain-text Alertmanager SNS message."""
+    import re
+    # Extract fields from text like "alertname = OutlinePodCrashLooping"
+    alertname = ""
+    severity = "warning"
+    summary = text.split("\n")[0]  # first line is the description
+    status = "firing"
+    source_url = ""
+
+    if "Alerts Resolved" in text:
+        status = "resolved"
+    elif "Alerts Firing" in text:
+        status = "firing"
+
+    m = re.search(r"alertname\s*=\s*(\S+)", text)
+    if m:
+        alertname = m.group(1)
+    m = re.search(r"severity\s*=\s*(\S+)", text)
+    if m:
+        severity = m.group(1)
+    m = re.search(r"summary\s*=\s*(.+)", text)
+    if m:
+        summary = m.group(1).strip()
+    m = re.search(r"Source:\s*(http\S+)", text)
+    if m:
+        source_url = m.group(1)
+
+    title = alertname or "Alertmanager Alert"
+
+    issue_url = ""
+    if severity in ("critical", "high", "error") and status == "firing":
+        issue_url = _create_or_update_github_issue(title, severity, summary,
+                                                   status, source_url)
+
+    card = _build_card(title, severity, "", "alertmanager", summary,
+                       status, source_url, issue_url)
+    _send_feishu_card(card)
+
+    return {"statusCode": 200, "body": json.dumps({"message": f"Processed text alert: {title}"})}
 
 
 def _handle_alertmanager(body):
@@ -220,21 +267,21 @@ def _create_or_update_github_issue(title, severity, summary, status, url):
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
     try:
+        # Close any existing open issues with the same title so the new one
+        # triggers issues.opened → GitHub Actions → DevOps Agent webhook.
         search_req = Request(search_url, headers=headers)
         with urlopen(search_req, timeout=10) as resp:
             results = json.loads(resp.read().decode())
 
-        if results.get("total_count", 0) > 0:
-            issue = results["items"][0]
-            issue_number = issue["number"]
-            comment_url = f"https://api.github.com/repos/{GITHUB_REPO}/issues/{issue_number}/comments"
-            comment_payload = json.dumps({"body": f"**Update — Status:** {status}\n\n{summary}"}).encode()
-            req = Request(comment_url, data=comment_payload,
+        for issue in results.get("items", []):
+            close_url = f"https://api.github.com/repos/{GITHUB_REPO}/issues/{issue['number']}"
+            close_payload = json.dumps({"state": "closed"}).encode()
+            req = Request(close_url, data=close_payload, method="PATCH",
                           headers={**headers, "Content-Type": "application/json"})
-            with urlopen(req, timeout=10) as resp:
-                logger.info("Updated GitHub issue #%s", issue_number)
-            return issue.get("html_url", "")
+            with urlopen(req, timeout=10):
+                logger.info("Closed old issue #%s", issue["number"])
 
+        # Always create a new issue to trigger issues.opened event
         req = Request(api_url, data=payload,
                       headers={**headers, "Content-Type": "application/json"})
         with urlopen(req, timeout=10) as resp:

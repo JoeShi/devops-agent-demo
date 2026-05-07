@@ -1,0 +1,54 @@
+# Scenario: Memory Leak → OOM Kill
+# Reduces container memory limit to 200Mi → Outline starts but OOM Kills under load
+# Triggers OutlinePodHighMemory (warning, >85%) then OutlinePodCrashLooping (critical)
+# Agent challenge: Must correlate memory usage curve (gradual rise, not spike)
+#                  with OOM Kill events and container restarts.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: chaos-oom-kill
+  namespace: outline
+  labels:
+    app: chaos
+    scenario: oom-kill
+spec:
+  schedule: "0 3,11,19 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: chaos-runner
+          restartPolicy: Never
+          containers:
+            - name: chaos
+              image: public.ecr.aws/bitnami/kubectl:1.33
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "=== [$(date)] CHAOS: OOM Kill ==="
+
+                  # Phase 1: Reduce memory limit to trigger OOM
+                  echo "[$(date)] Phase 1: Reducing outline-web memory limit to 200Mi"
+                  kubectl patch deployment outline-web -n outline --type=json -p='[
+                    {"op":"add","path":"/spec/template/metadata/annotations/chaos-injected","value":"oom-kill-'$(date -u +%Y%m%dT%H%M%SZ)'"},
+                    {"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"200Mi"},
+                    {"op":"replace","path":"/spec/template/spec/containers/0/resources/requests/memory","value":"180Mi"}
+                  ]'
+                  echo "[$(date)] Memory limit set to 200Mi. Outline needs ~300-500Mi, will OOM Kill."
+
+                  # Phase 2: Wait for OOM + CrashLoop alerts
+                  echo "[$(date)] Phase 2: Waiting 8 min for OOM Kill → CrashLoop → alerts"
+                  sleep 480
+
+                  # Phase 3: Rollback
+                  echo "[$(date)] Phase 3: Restoring original memory limits"
+                  kubectl rollout undo deployment/outline-web -n outline
+                  kubectl rollout status deployment/outline-web -n outline --timeout=180s
+                  echo "[$(date)] CHAOS COMPLETE. Memory limits restored."

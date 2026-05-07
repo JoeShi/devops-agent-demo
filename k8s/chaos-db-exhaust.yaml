@@ -1,0 +1,54 @@
+# Scenario: DB Connection Pool Exhaustion
+# Injects invalid DATABASE_URL pointing to unreachable host
+# → Outline can't connect to PostgreSQL → immediate crash on startup
+# Agent challenge: Must check CloudWatch RDS metrics (healthy!) vs app logs
+#                  showing "connection refused" to a wrong host, and correlate
+#                  with the deployment change that introduced the bad URL.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: chaos-db-exhaust
+  namespace: outline
+  labels:
+    app: chaos
+    scenario: db-exhaust
+spec:
+  schedule: "0 5,13,21 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: chaos-runner
+          restartPolicy: Never
+          containers:
+            - name: chaos
+              image: public.ecr.aws/bitnami/kubectl:1.33
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "=== [$(date)] CHAOS: DB Connection Failure ==="
+
+                  # Phase 1: Inject bad DATABASE_URL
+                  echo "[$(date)] Phase 1: Injecting unreachable DATABASE_URL"
+                  kubectl patch deployment outline-web -n outline --type=json -p='[
+                    {"op":"add","path":"/spec/template/metadata/annotations/chaos-injected","value":"db-exhaust-'$(date -u +%Y%m%dT%H%M%SZ)'"},
+                    {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"DATABASE_URL","value":"postgres://outline:fake@10.255.255.1:5432/outline"}}
+                  ]'
+                  echo "[$(date)] DATABASE_URL overridden to unreachable host. Pods will crash."
+
+                  # Phase 2: Wait for CrashLoop alerts
+                  echo "[$(date)] Phase 2: Waiting 8 min for alert pipeline"
+                  sleep 480
+
+                  # Phase 3: Rollback
+                  echo "[$(date)] Phase 3: Rolling back deployment"
+                  kubectl rollout undo deployment/outline-web -n outline
+                  kubectl rollout status deployment/outline-web -n outline --timeout=180s
+                  echo "[$(date)] CHAOS COMPLETE. DB connectivity restored."
