@@ -1,0 +1,168 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-trigger-code
+  namespace: outline
+data:
+  app.py: |
+    """Chaos Trigger API — trigger/status/cleanup chaos scenarios."""
+    import subprocess, json, os, time
+    from flask import Flask, jsonify, Blueprint
+    from flask_cors import CORS
+
+    bp = Blueprint('chaos', __name__)
+    app = Flask(__name__)
+    CORS(app)
+
+    SCENARIOS = {
+        "redis-failure": {
+            "name": "Redis 级联故障",
+            "cronjob": "chaos-redis-failure",
+            "description": "阻断 Redis + 注入无效 REDIS_URL → CrashLoopBackOff",
+            "duration": "~12 min",
+            "alert": "OutlinePodCrashLooping",
+        },
+        "dns-failure": {
+            "name": "DNS 解析故障",
+            "cronjob": "chaos-dns-failure",
+            "description": "注入不可达 DNS → 域名解析失败 → CrashLoopBackOff",
+            "duration": "~10 min",
+            "alert": "OutlineDNSFailure",
+        },
+        "oom-kill": {
+            "name": "OOM Kill",
+            "cronjob": "chaos-oom-kill",
+            "description": "内存限制降到 200Mi → OOM Kill (exit 137)",
+            "duration": "~10 min",
+            "alert": "OutlinePodOOMKilled",
+        },
+        "db-exhaust": {
+            "name": "DB 连接失败",
+            "cronjob": "chaos-db-exhaust",
+            "description": "注入无效 DATABASE_URL → 连接超时 → CrashLoopBackOff",
+            "duration": "~10 min",
+            "alert": "OutlineDBConnectionFailure",
+        },
+    }
+
+    NS = "outline"
+
+    def _kubectl(*args):
+        r = subprocess.run(["kubectl", "-n", NS] + list(args),
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout.strip(), r.stderr.strip(), r.returncode
+
+    @bp.route("/")
+    def index():
+        return jsonify({"scenarios": SCENARIOS})
+
+    @bp.route("/trigger/<scenario>", methods=["POST", "GET"])
+    def trigger(scenario):
+        if scenario not in SCENARIOS:
+            return jsonify({"error": f"Unknown: {scenario}"}), 404
+        info = SCENARIOS[scenario]
+        job_name = f"demo-{scenario}-{int(time.time())}"
+        out, err, rc = _kubectl("create", "job", f"--from=cronjob/{info['cronjob']}", job_name)
+        if rc != 0:
+            return jsonify({"error": err}), 500
+        return jsonify({"status": "triggered", "scenario": info["name"],
+                         "job": job_name, "duration": info["duration"]})
+
+    @bp.route("/status")
+    def status():
+        out, _, _ = _kubectl("get", "jobs", "-o", "json")
+        jobs = []
+        if out:
+            for j in json.loads(out).get("items", []):
+                n = j["metadata"]["name"]
+                if not n.startswith("demo-"):
+                    continue
+                jobs.append({"name": n,
+                    "status": "Complete" if j["status"].get("succeeded") else
+                              "Failed" if j["status"].get("failed") else "Running",
+                    "age": j["metadata"].get("creationTimestamp", "")})
+        out2, _, _ = _kubectl("get", "pods", "-l", "app=outline,component=web",
+            "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[0].restartCount}\\n{end}")
+        pods = []
+        for line in out2.strip().split("\n"):
+            if "|" in line:
+                p = line.split("|")
+                pods.append({"pod": p[0], "phase": p[1], "restarts": p[2]})
+        out3, _, _ = _kubectl("get", "networkpolicy", "-l", "app=chaos",
+            "-o", "jsonpath={range .items[*]}{.metadata.name} {end}")
+        return jsonify({"jobs": jobs, "pods": pods,
+                         "network_policies": out3.split() if out3 else []})
+
+    @bp.route("/cleanup", methods=["POST", "GET"])
+    def cleanup():
+        results = []
+        for np in ["block-redis", "block-dns", "block-postgres"]:
+            out, _, _ = _kubectl("delete", "networkpolicy", np, "--ignore-not-found")
+            if "deleted" in out:
+                results.append(out)
+        out, _, _ = _kubectl("rollout", "undo", "deployment/outline-web")
+        results.append(out)
+        return jsonify({"status": "cleanup done", "actions": results})
+
+    app.register_blueprint(bp, url_prefix="/chaos")
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-trigger
+  namespace: outline
+  labels:
+    app: chaos-trigger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chaos-trigger
+  template:
+    metadata:
+      labels:
+        app: chaos-trigger
+    spec:
+      serviceAccountName: chaos-runner
+      containers:
+        - name: api
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              pip install --quiet flask flask-cors &&
+              apt-get update && apt-get install -y --no-install-recommends curl &&
+              curl -sLO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl" &&
+              chmod +x kubectl && mv kubectl /usr/local/bin/ &&
+              python /app/app.py
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: code
+          configMap:
+            name: chaos-trigger-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chaos-trigger
+  namespace: outline
+spec:
+  selector:
+    app: chaos-trigger
+  ports:
+    - port: 80
+      targetPort: 8080

@@ -19,6 +19,38 @@ spec:
             summary: "Outline pod {{ $labels.pod }} is crash looping"
             description: "Pod {{ $labels.pod }} restarted {{ $value | humanize }} times in the last 15 minutes."
 
+        - alert: OutlinePodOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{namespace="outline",container="outline",reason="OOMKilled"} == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline pod {{ $labels.pod }} OOM Killed"
+            description: "Pod {{ $labels.pod }} was terminated due to OOM Kill (exit code 137). Check container memory limits."
+
+        - alert: OutlineDNSFailure
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="outline",container="outline"}[10m]) * 60 * 10 > 2
+            and on(pod) kube_pod_container_status_last_terminated_reason{namespace="outline",container="outline",reason="Error"} == 1
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline pod {{ $labels.pod }} failing with Error - possible DNS or config issue"
+            description: "Pod {{ $labels.pod }} is crash looping with Error status. Check DNS resolution and database connectivity."
+
+        - alert: OutlineDBConnectionFailure
+          expr: |
+            kube_pod_container_status_waiting_reason{namespace="outline",container="outline",reason="CrashLoopBackOff"} == 1
+            unless on(pod) kube_pod_container_status_last_terminated_reason{namespace="outline",container="outline",reason="OOMKilled"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Outline pod {{ $labels.pod }} in CrashLoopBackOff - possible DB connection failure"
+            description: "Pod {{ $labels.pod }} is in CrashLoopBackOff (non-OOM). Check database connectivity and configuration."
+
         - alert: OutlinePodHighMemory
           expr: |
             container_memory_working_set_bytes{namespace="outline",container="outline"}

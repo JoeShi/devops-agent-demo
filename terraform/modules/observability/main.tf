@@ -122,6 +122,7 @@ resource "helm_release" "kube_prometheus_stack" {
               sns_configs = [{
                 topic_arn     = var.alertmanager_sns_topic_arn
                 send_resolved = true
+                subject       = "Outline Alert"
                 sigv4 = {
                   region = "us-east-1"
                 }

@@ -1,0 +1,54 @@
+# Scenario: DNS Resolution Failure
+# Patches deployment with dnsConfig pointing to unreachable DNS server
+# → all hostname resolution fails → RDS/Redis connection errors → CrashLoop
+# Agent challenge: CloudWatch shows RDS & Redis healthy, but app logs show
+#                  "getaddrinfo ENOTFOUND". Root cause is DNS misconfiguration.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: chaos-dns-failure
+  namespace: outline
+  labels:
+    app: chaos
+    scenario: dns-failure
+spec:
+  schedule: "30 1,9,17 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: chaos-runner
+          restartPolicy: Never
+          containers:
+            - name: chaos
+              image: public.ecr.aws/bitnami/kubectl:1.33
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "=== [$(date)] CHAOS: DNS Resolution Failure ==="
+
+                  # Phase 1: Patch deployment with broken DNS config
+                  echo "[$(date)] Phase 1: Injecting unreachable DNS server"
+                  kubectl patch deployment outline-web -n outline --type=json -p='[
+                    {"op":"add","path":"/spec/template/metadata/annotations/chaos-injected","value":"dns-failure-'$(date -u +%Y%m%dT%H%M%SZ)'"},
+                    {"op":"add","path":"/spec/template/spec/dnsPolicy","value":"None"},
+                    {"op":"add","path":"/spec/template/spec/dnsConfig","value":{"nameservers":["10.255.255.1"],"searches":["outline.svc.cluster.local"],"options":[{"name":"ndots","value":"1"},{"name":"timeout","value":"1"},{"name":"attempts","value":"1"}]}}
+                  ]'
+                  echo "[$(date)] DNS patched to 10.255.255.1 (unreachable). Pods will fail all DNS lookups."
+
+                  # Phase 2: Wait for CrashLoop
+                  echo "[$(date)] Phase 2: Waiting 8 min for alerts to fire and propagate"
+                  sleep 480
+
+                  # Phase 3: Rollback
+                  echo "[$(date)] Phase 3: Rolling back deployment"
+                  kubectl rollout undo deployment/outline-web -n outline
+                  kubectl rollout status deployment/outline-web -n outline --timeout=180s
+                  echo "[$(date)] CHAOS COMPLETE. DNS restored."
