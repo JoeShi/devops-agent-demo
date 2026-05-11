@@ -99,10 +99,10 @@ def _handle_alertmanager_text(text):
     status = "firing"
     source_url = ""
 
-    if "Alerts Resolved" in text:
-        status = "resolved"
-    elif "Alerts Firing" in text:
+    if "Alerts Firing" in text:
         status = "firing"
+    elif "Alerts Resolved" in text:
+        status = "resolved"
 
     m = re.search(r"alertname\s*=\s*(\S+)", text)
     if m:

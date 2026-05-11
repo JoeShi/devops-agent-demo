@@ -60,6 +60,11 @@ data:
     def trigger(scenario):
         if scenario not in SCENARIOS:
             return jsonify({"error": f"Unknown: {scenario}"}), 404
+        # Check for active chaos jobs — only one scenario at a time
+        out, _, _ = _kubectl("get", "jobs", "-o", "jsonpath={.items[?(@.status.active==1)].metadata.name}")
+        active = [j for j in out.strip().split() if j.startswith("demo-")]
+        if active:
+            return jsonify({"error": f"Another chaos scenario is running: {active[0]}. Wait for it to finish (~10 min) or click /chaos/cleanup first."}), 409
         info = SCENARIOS[scenario]
         job_name = f"demo-{scenario}-{int(time.time())}"
         out, err, rc = _kubectl("create", "job", f"--from=cronjob/{info['cronjob']}", job_name)
@@ -100,8 +105,10 @@ data:
             out, _, _ = _kubectl("delete", "networkpolicy", np, "--ignore-not-found")
             if "deleted" in out:
                 results.append(out)
-        out, _, _ = _kubectl("rollout", "undo", "deployment/outline-web")
-        results.append(out)
+        # Restore clean env (json patch only touches env, not containers/sidecar/envFrom)
+        out, _, _ = _kubectl("patch", "deployment/outline-web", "--type=json",
+            '-p=[{"op":"replace","path":"/spec/template/spec/containers/0/env","value":[{"name":"URL","value":"https://outline.devops-agent.xyz"},{"name":"PORT","value":"3000"},{"name":"FILE_STORAGE","value":"local"},{"name":"PGSSLMODE","value":"require"},{"name":"NODE_TLS_REJECT_UNAUTHORIZED","value":"0"}]},{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"1Gi"},{"op":"replace","path":"/spec/template/spec/containers/0/resources/requests/memory","value":"512Mi"},{"op":"replace","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirst"}]')
+        results.append(out or "deployment patched")
         return jsonify({"status": "cleanup done", "actions": results})
 
     app.register_blueprint(bp, url_prefix="/chaos")
