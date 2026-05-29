@@ -1,0 +1,89 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: feishu-bot-sre
+  namespace: outline
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::604179600882:role/outline-demo-eks-feishu-bot-role
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: feishu-bot-sre
+  namespace: outline
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: SecretStore
+  target:
+    name: feishu-bot-sre
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: outline/feishu-bot-2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feishu-bot-sre
+  namespace: outline
+  labels:
+    app: feishu-bot-sre
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feishu-bot-sre
+  template:
+    metadata:
+      labels:
+        app: feishu-bot-sre
+    spec:
+      serviceAccountName: feishu-bot-sre
+      containers:
+        - name: bot
+          image: 604179600882.dkr.ecr.us-east-1.amazonaws.com/feishu-bot-sre:latest
+          envFrom:
+            - secretRef:
+                name: feishu-bot-sre
+          env:
+            - name: AWS_REGION
+              value: "us-east-1"
+          ports:
+            - containerPort: 8080
+              name: alert
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feishu-bot-sre
+  namespace: outline
+spec:
+  selector:
+    app: feishu-bot-sre
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: alert
