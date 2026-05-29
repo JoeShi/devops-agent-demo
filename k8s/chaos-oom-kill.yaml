@@ -49,6 +49,6 @@ spec:
 
                   # Phase 3: Rollback
                   echo "[$(date)] Phase 3: Restoring original memory limits"
-                  kubectl rollout undo deployment/outline-web -n outline
+                  kubectl patch deployment outline-web -n outline --type=json -p='[{"op":"replace","path":"/spec/template/spec/containers/0/env","value":[{"name":"URL","value":"https://outline.devops-agent.xyz"},{"name":"PORT","value":"3000"},{"name":"FILE_STORAGE","value":"local"},{"name":"PGSSLMODE","value":"require"},{"name":"NODE_TLS_REJECT_UNAUTHORIZED","value":"0"}]},{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"1Gi"},{"op":"replace","path":"/spec/template/spec/containers/0/resources/requests/memory","value":"512Mi"},{"op":"replace","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirst"}]'
                   kubectl rollout status deployment/outline-web -n outline --timeout=180s
                   echo "[$(date)] CHAOS COMPLETE. Memory limits restored."

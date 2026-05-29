@@ -18,7 +18,7 @@ rules:
     verbs: ["delete", "get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale", "replicasets"]
-    verbs: ["get", "list", "patch", "update"]
+    verbs: ["get", "list", "patch", "update", "watch"]
   - apiGroups: ["batch"]
     resources: ["cronjobs", "jobs"]
     verbs: ["get", "list", "create", "delete"]
@@ -118,7 +118,7 @@ spec:
 
                   # Phase 4: Rollback
                   echo "[$(date)] Phase 4: Rolling back deployment"
-                  kubectl rollout undo deployment/outline-web -n outline
+                  kubectl patch deployment outline-web -n outline --type=json -p='[{"op":"replace","path":"/spec/template/spec/containers/0/env","value":[{"name":"URL","value":"https://outline.devops-agent.xyz"},{"name":"PORT","value":"3000"},{"name":"FILE_STORAGE","value":"local"},{"name":"PGSSLMODE","value":"require"},{"name":"NODE_TLS_REJECT_UNAUTHORIZED","value":"0"}]},{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"1Gi"},{"op":"replace","path":"/spec/template/spec/containers/0/resources/requests/memory","value":"512Mi"},{"op":"replace","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirst"}]'
                   kubectl delete networkpolicy block-redis -n outline --ignore-not-found
                   kubectl rollout status deployment/outline-web -n outline --timeout=180s
                   echo "[$(date)] CHAOS COMPLETE. Service restored."

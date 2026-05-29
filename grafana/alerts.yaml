@@ -12,7 +12,7 @@ spec:
       rules:
         - alert: OutlinePodCrashLooping
           expr: rate(kube_pod_container_status_restarts_total{namespace="outline"}[15m]) * 60 * 15 > 3
-          for: 5m
+          for: 2m
           labels:
             severity: critical
           annotations:
