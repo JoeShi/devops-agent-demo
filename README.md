@@ -96,6 +96,11 @@ EventBridge (aws.aidevops) → Lambda (investigation_notifier)
 │   │   ├── app.py
 │   │   ├── Dockerfile
 │   │   └── requirements.txt
+│   ├── mcp-server/              # MCP Server for Amazon Quick Desktop
+│   │   ├── app.py
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   ├── mcp-server-deployment.yaml # MCP Server K8s manifest
 │   ├── service.yaml
 │   ├── ingress.yaml              # ALB Ingress
 │   ├── hpa.yaml                  # Auto-scaling
@@ -716,6 +721,108 @@ DingTalk ──▶ User
 | 群里收到 `（DevOps Agent 未返回内容）` | Agent send_message 返回了事件但没有 text 增量 | 检查 `kubectl logs` 里 EventStream 的 `contentBlockStart` 类型 |
 | 群消息发送失败 `status=403` | access_token 过期或权限不足 | 检查 Pod 日志中 token 刷新是否正常；确认已申请 `qyapi_robot_sendmsg` 权限 |
 | WS 断开后迟迟不重连 | EKS 节点 DNS 故障或出站阻断 | 检查 `kubectl exec -n outline deploy/dingtalk-bot -- nslookup api.dingtalk.com`；确认 NAT 出口到 dingtalk.com 443 未被策略拦 |
+
+### 3g. MCP Server — Amazon Quick Desktop 集成
+
+将 DevOps Agent SRE Chat API 封装为标准 MCP (Model Context Protocol) Server，供 Amazon Quick Desktop 通过 Remote MCP 连接调用。
+
+#### 架构
+
+```
+Amazon Quick Desktop / Quick Web
+  → Remote MCP (HTTPS + Bearer Token)
+    → ALB (mcp.devops-agent.xyz, shared ALB group)
+      → EKS Pod (MCP Server, IRSA)
+        → DevOps Agent Chat API (aidevops)
+```
+
+#### 暴露的 Tools
+
+| Tool | 描述 |
+|------|------|
+| `sre_chat` | 向 DevOps Agent 提问 SRE 问题，返回根因分析结果 |
+| `list_investigations` | 列出近期调查任务 |
+| `get_investigation` | 获取指定调查详情/根因摘要 |
+
+#### 3g-1. 创建 Secrets Manager 密钥
+
+```bash
+aws secretsmanager create-secret \
+  --name outline/mcp-server \
+  --region us-east-1 \
+  --secret-string '{
+    "DEVOPS_AGENT_SPACE_ID": "<your-agent-space-id>",
+    "MCP_BEARER_TOKEN": "<generate-a-random-token>"
+  }'
+```
+
+生成 token：`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+#### 3g-2. 构建并推送镜像
+
+```bash
+# Create ECR repo (first time only)
+aws ecr create-repository --repository-name mcp-server --region us-east-1
+
+# Authenticate
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin 604179600882.dkr.ecr.us-east-1.amazonaws.com
+
+# Build and push
+docker build --platform linux/amd64 \
+  -t 604179600882.dkr.ecr.us-east-1.amazonaws.com/mcp-server:latest k8s/mcp-server/
+docker push 604179600882.dkr.ecr.us-east-1.amazonaws.com/mcp-server:latest
+```
+
+#### 3g-3. 创建 DNS 记录
+
+在 Route53 中为 `mcp.devops-agent.xyz` 创建 CNAME/Alias 指向共享 ALB（与 grafana.devops-agent.xyz 同一个 ALB）。
+
+#### 3g-4. 部署
+
+```bash
+kubectl apply -f k8s/mcp-server-deployment.yaml
+```
+
+验证：
+
+```bash
+# Pod should be Running
+kubectl get pods -n outline -l app=mcp-server
+
+# Health check
+curl -s https://mcp.devops-agent.xyz/mcp | head
+
+# Test tool list (MCP protocol)
+curl -s -X POST https://mcp.devops-agent.xyz/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+```
+
+#### 3g-5. 在 Amazon Quick Desktop 中配置
+
+1. 打开 Quick Desktop → **Settings** → **Capabilities** → **MCP** tab
+2. 点击 **+ Add MCP** → 选择 **Remote**
+3. 填写：
+   - **Name**: `DevOps Agent SRE`
+   - **URL**: `https://mcp.devops-agent.xyz/mcp`
+   - **Token**: 上面生成的 Bearer Token
+   - **Description**: `AWS DevOps Agent SRE Chat - ask questions about infrastructure incidents, metrics, logs, and deployments`
+4. 点击 **+ Add MCP** 保存
+
+配置完成后，在 Quick Desktop 对话中即可使用自然语言触发 SRE 工具，例如：
+- "Ask the SRE agent why API latency is high"
+- "List recent investigations"
+- "What was the root cause of the last incident?"
+
+#### 3g-6. 故障排查
+
+| 症状 | 原因 | 修复方法 |
+|------|------|----------|
+| Quick Desktop 报 `Connection failed` | DNS 未配置或 ALB 未就绪 | 确认 `nslookup mcp.devops-agent.xyz` 解析正常；检查 `kubectl get ingress -n outline mcp-server` |
+| 401 Unauthorized | Token 不匹配 | 检查 Quick Desktop 中的 Token 与 Secrets Manager `outline/mcp-server` 中的 `MCP_BEARER_TOKEN` 一致 |
+| Tool call 超时 | DevOps Agent 推理耗时过长 | Agent 回复通常需要 5-30 秒，Quick Desktop 默认超时 30 秒；对复杂问题可能需要拆分为多步 |
+| `AccessDenied aidevops:CreateChat` | IRSA 角色权限不足 | 确认 ServiceAccount `mcp-server` 的注解指向正确的 IAM Role |
 
 ## 第四步：配置 CI/CD
 
