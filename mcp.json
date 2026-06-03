@@ -1,11 +1,7 @@
 {
   "mcpServers": {
-    "DevOps Agent SRE": {
-      "url": "https://mcp.devops-agent.xyz/mcp",
-      "headers": {
-        "Authorization": "Bearer QXNE9xs1A7NYq06veshOqvmR0zkS6_nFJhSVYNAlH4E"
-      },
-      "description": "AWS DevOps Agent SRE Chat - ask questions about infrastructure incidents, metrics, logs, and deployments"
+    "devops-agent-sre": {
+      "url": "https://mcp.devops-agent.xyz/mcp"
     }
   }
 }
