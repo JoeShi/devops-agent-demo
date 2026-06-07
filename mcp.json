@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "devops-agent-sre": {
+      "url": "https://mcp.devops-agent.xyz/mcp"
+    }
+  }
+}
