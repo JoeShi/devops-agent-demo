@@ -1,23 +1,21 @@
 """
 WeCom Bot — AWS DevOps Agent SRE Chat
-Long-lived WebSocket connection via WeCom aibot long-connection protocol.
-Forwards @bot messages to DevOps Agent Chat API and streams replies back to
-WeCom group chats.
 
-Mirrors k8s/feishu-bot/app.py section-for-section. DevOps Agent EventStream
-handling (lines ~70-120) is copy-adapted from the feishu-bot reference.
+Uses the official ``wecom-aibot-python-sdk`` (WecomTeam/Tencent, PyPI v1.0.2+)
+to maintain a long-lived WebSocket connection to the WeCom aibot long-connection
+channel. Forwards @bot text messages to the AWS DevOps Agent Chat API and
+streams replies back to WeCom group chats.
+
+Mirrors k8s/feishu-bot/app.py in lifecycle shape and in DevOps Agent EventStream
+parsing (``ask_devops_agent`` below is copy-adapted from feishu-bot app.py:57-89).
 """
 
-import json
+import asyncio
 import logging
 import os
-import threading
-import time
-import uuid
 
 import boto3
-from websockets.sync.client import connect as ws_connect
-from websockets.exceptions import ConnectionClosed
+from aibot import WSClient, WSClientOptions
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,39 +28,40 @@ WECOM_BOT_ID = os.environ["WECOM_BOT_ID"]
 WECOM_BOT_SECRET = os.environ["WECOM_BOT_SECRET"]
 AGENT_SPACE_ID = os.environ["DEVOPS_AGENT_SPACE_ID"]
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-WECOM_WS_URL = os.environ.get("WECOM_WS_URL", "wss://openws.work.weixin.qq.com")
 
 # ── Protocol constants ─────────────────────────────────────────────────────
 ACK_CONTENT = "收到，正在思考…"
 # WeCom markdown has a 4096-byte server-side cap. Leave headroom for the
 # enclosing frame and the "(i/N)" prefix we add to multi-chunk replies.
 REPLY_MAX_BYTES = 3500
-MAX_BACKOFF_SECONDS = 60
 
 # ── AWS DevOps Agent client ────────────────────────────────────────────────
 devops = boto3.client("devops-agent", region_name=AWS_REGION)
 
 # ── Per-session execution ID cache (reset on restart) ──────────────────────
 _sessions: dict[str, str] = {}
-_lock = threading.Lock()
+_sessions_lock = asyncio.Lock()
 
 
-def get_or_create_execution(session_key: str) -> str:
+async def get_or_create_execution(session_key: str) -> str:
     """Maintain one DevOps Agent executionId per WeCom conversation."""
-    with _lock:
+    async with _sessions_lock:
         if session_key not in _sessions:
-            resp = devops.create_chat(agentSpaceId=AGENT_SPACE_ID)
+            resp = await asyncio.to_thread(
+                devops.create_chat, agentSpaceId=AGENT_SPACE_ID
+            )
             _sessions[session_key] = resp["executionId"]
             logger.info("Created execution %s for session %s",
                         resp["executionId"], session_key)
         return _sessions[session_key]
 
 
-def ask_devops_agent(session_key: str, query: str) -> str:
+async def ask_devops_agent(session_key: str, query: str) -> str:
     """Send a message and collect the streamed response."""
-    execution_id = get_or_create_execution(session_key)
+    execution_id = await get_or_create_execution(session_key)
     try:
-        resp = devops.send_message(
+        resp = await asyncio.to_thread(
+            devops.send_message,
             agentSpaceId=AGENT_SPACE_ID,
             executionId=execution_id,
             content=query,
@@ -89,7 +88,7 @@ def ask_devops_agent(session_key: str, query: str) -> str:
     except Exception:
         logger.exception("DevOps Agent call failed")
         # Evict session so next call creates a fresh execution
-        with _lock:
+        async with _sessions_lock:
             _sessions.pop(session_key, None)
         return "调用 DevOps Agent 失败，已重置会话，请重试。"
 
@@ -134,55 +133,10 @@ def split_utf8_chunks(text: str, max_bytes: int = REPLY_MAX_BYTES) -> list[str]:
     return chunks
 
 
-# ── WeCom aibot long-connection frames ─────────────────────────────────────
-
-def send_subscribe(ws) -> None:
-    """Send the initial aibot_subscribe frame with bot_id + secret."""
-    frame = {
-        "cmd": "aibot_subscribe",
-        "headers": {"req_id": uuid.uuid4().hex},
-        "body": {"bot_id": WECOM_BOT_ID, "secret": WECOM_BOT_SECRET},
-    }
-    ws.send(json.dumps(frame))
-    logger.info("Sent aibot_subscribe for bot_id=%s", WECOM_BOT_ID)
-
-
-def send_ack(ws, req_id: str) -> None:
-    """Reply to aibot_msg_callback with the ACK frame (same req_id)."""
-    ack = {
-        "cmd": "aibot_respond_msg",
-        "headers": {"req_id": req_id},
-        "body": {
-            "msgtype": "markdown",
-            "markdown": {"content": ACK_CONTENT},
-        },
-    }
-    ws.send(json.dumps(ack, ensure_ascii=False))
-
-
-def send_reply(ws, chatid: str | None, text: str) -> None:
-    """Send the DevOps Agent reply back to WeCom, chunked if needed."""
-    chunks = split_utf8_chunks(text, REPLY_MAX_BYTES)
-    for i, chunk in enumerate(chunks, start=1):
-        content = f"（{i}/{len(chunks)}）\n{chunk}" if len(chunks) > 1 else chunk
-        frame = {
-            "cmd": "aibot_send_msg",
-            "headers": {"req_id": uuid.uuid4().hex},
-            "body": {
-                "chatid": chatid,
-                "msgtype": "markdown",
-                "markdown": {"content": content},
-            },
-        }
-        try:
-            ws.send(json.dumps(frame, ensure_ascii=False))
-        except Exception:
-            logger.exception("aibot_send_msg failed")
-            return
-
+# ── Session + message helpers ──────────────────────────────────────────────
 
 def extract_session_and_text(body: dict) -> tuple[str, str]:
-    """Pull chat session key + user text out of an aibot_msg_callback body.
+    """Pull chat session key + user text out of a message callback body.
 
     Prefer chatid so one WeCom group maps to one DevOps Agent execution;
     fall back to the sender userid for 1:1 DMs.
@@ -197,14 +151,11 @@ def extract_session_and_text(body: dict) -> tuple[str, str]:
     return session_key, (text or "").strip()
 
 
-def handle_callback(ws, msg: dict) -> None:
-    """Handle a single aibot_msg_callback frame: ack, then reply async."""
-    body = msg.get("body", {}) or {}
-    req_id = (msg.get("headers") or {}).get("req_id") or uuid.uuid4().hex
+# ── Message handler ────────────────────────────────────────────────────────
 
-    # 1. Immediate ack so WeCom marks the @mention as handled.
-    send_ack(ws, req_id)
-
+async def _process_and_reply(ws_client: WSClient, frame: dict) -> None:
+    """Run the DevOps Agent round-trip and send reply chunks."""
+    body = frame.get("body") or {}
     session_key, text = extract_session_and_text(body)
     if not text:
         logger.info("Empty text, ignoring session=%s", session_key)
@@ -212,67 +163,63 @@ def handle_callback(ws, msg: dict) -> None:
 
     logger.info("Received [%s]: %s", session_key, text[:200])
 
-    # 2. Call DevOps Agent on a worker thread so the receive loop stays
-    #    responsive to further frames (ack + ping + other chats).
-    def _process():
-        reply = ask_devops_agent(session_key, text)
-        logger.info("Reply [%s]: %s", session_key, reply[:200])
-        send_reply(ws, body.get("chatid"), reply)
+    reply = await ask_devops_agent(session_key, text)
+    logger.info("Reply [%s]: %s", session_key, reply[:200])
 
-    threading.Thread(target=_process, daemon=True).start()
+    chatid = body.get("chatid") or (body.get("from") or {}).get("userid")
+    if not chatid:
+        logger.warning("No chatid/userid in body, cannot send reply")
+        return
 
-
-# ── Main reconnect loop ────────────────────────────────────────────────────
-
-def run_once() -> None:
-    """One connect → subscribe → receive-loop cycle.
-
-    Returns on graceful close or raises on error so the outer loop can
-    back off and reconnect.
-    """
-    # WeCom's openws server rejects BOTH our JSON app-level ping and the
-    # RFC 6455 ping frame with PROTOCOL_ERROR 1002 ("incorrect masking").
-    # Disable library keepalive entirely; the subscribe session is long-lived
-    # and the reconnect loop re-establishes the socket within ~1s on idle.
-    with ws_connect(WECOM_WS_URL, ping_interval=None) as ws:
-        logger.info("Connected to %s", WECOM_WS_URL)
-        send_subscribe(ws)
-        for raw in ws:
-            try:
-                msg = json.loads(raw)
-            except (TypeError, ValueError):
-                logger.debug("Non-JSON frame: %r", raw)
-                continue
-            if not isinstance(msg, dict):
-                continue
-            cmd = msg.get("cmd") or msg.get("type")
-            if cmd == "aibot_msg_callback":
-                handle_callback(ws, msg)
-            else:
-                logger.debug("Ignored frame cmd=%s", cmd)
-
-
-def main() -> None:
-    logger.info("Starting WeCom Bot WebSocket client …")
-    attempt = 0
-    while True:
+    chunks = split_utf8_chunks(reply, REPLY_MAX_BYTES)
+    for i, chunk in enumerate(chunks, start=1):
+        content = f"（{i}/{len(chunks)}）\n{chunk}" if len(chunks) > 1 else chunk
         try:
-            run_once()
-            # Graceful close — reset backoff and reconnect immediately.
-            attempt = 0
-        except ConnectionClosed as exc:
-            delay = min(2 ** attempt, MAX_BACKOFF_SECONDS)
-            attempt += 1
-            logger.warning("WS closed (%s); reconnecting in %ds (attempt %d)",
-                           exc, delay, attempt)
-            time.sleep(delay)
+            await ws_client.send_message(
+                chatid,
+                {"msgtype": "markdown", "markdown": {"content": content}},
+            )
         except Exception:
-            delay = min(2 ** attempt, MAX_BACKOFF_SECONDS)
-            attempt += 1
-            logger.exception("WS error; reconnecting in %ds (attempt %d)",
-                             delay, attempt)
-            time.sleep(delay)
+            logger.exception("send_message failed (chunk %d/%d)", i, len(chunks))
+            return
+
+
+def register_handlers(ws_client: WSClient) -> None:
+    """Wire SDK events to our async handlers."""
+
+    @ws_client.on("message.text")
+    async def on_text(frame: dict) -> None:
+        # 1. Immediate ACK on the same req_id so WeCom marks the @mention as handled.
+        try:
+            await ws_client.reply(
+                frame,
+                {"msgtype": "markdown", "markdown": {"content": ACK_CONTENT}},
+            )
+        except Exception:
+            logger.exception("ACK reply failed; continuing to process")
+
+        # 2. Process on a background task so the handler returns fast and the
+        #    SDK receive loop / heartbeat stay responsive.
+        asyncio.create_task(_process_and_reply(ws_client, frame))
+
+
+# ── Main ───────────────────────────────────────────────────────────────────
+
+async def main() -> None:
+    logger.info("Starting WeCom Bot via wecom-aibot-python-sdk …")
+    ws_client = WSClient(
+        WSClientOptions(
+            bot_id=WECOM_BOT_ID,
+            secret=WECOM_BOT_SECRET,
+            max_reconnect_attempts=-1,  # infinite reconnect
+        )
+    )
+    register_handlers(ws_client)
+    await ws_client.connect()
+    logger.info("WSClient connected; waiting for messages.")
+    # Block until process is killed. The SDK owns reconnect internally.
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
